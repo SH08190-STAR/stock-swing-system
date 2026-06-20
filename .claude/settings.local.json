@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(py -0p)",
+      "PowerShell(py --version)",
+      "PowerShell(\"----\")",
+      "PowerShell($env:PYTHONUTF8=1; py _live_check.py 2>&1 | Select-Object -Last 40)",
+      "mcp__mcp-registry__list_connectors",
+      "mcp__mcp-registry__search_mcp_registry",
+      "mcp__visualize__read_me",
+      "mcp__visualize__show_widget",
+      "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:8501/_stcore/health\" -UseBasicParsing -TimeoutSec 10; \"health: $\\($r.StatusCode\\) $\\($r.Content\\)\" } catch { \"ERR: $\\($_.Exception.Message\\)\" })",
+      "PowerShell(try { $c = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction Stop; $c.OwningProcess | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force; \"killed PID $_\" } } catch { \"no listener on 8501\" })",
+      "Bash(exit 1)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(git check-ignore *)",
+      "Bash(grep -Ei '\\\\.env$|_live|_demo|_dump|_e2e|_db_test|_imp|_merge|classmap')"
+    ]
+  }
+}
