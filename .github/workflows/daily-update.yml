@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: "40 7 * * 1-5"   # 평일 UTC 07:40 = KST 16:40
   workflow_dispatch:
+    inputs:
+      force:
+        description: "거래일 판정을 무시하고 강제 실행(주말/휴장 테스트용)"
+        type: boolean
+        default: false
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -16,10 +21,13 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Run daily update
         env:
+          PYTHONPATH: ${{ github.workspace }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DATA_GO_KR_SERVICE_KEY: ${{ secrets.DATA_GO_KR_SERVICE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
-          NOTIFY_CHANNEL: telegram
+          NOTIFY_CHANNEL: ${{ secrets.NOTIFY_CHANNEL || 'none' }}
+          FORCE_RUN: ${{ inputs.force && '1' || '0' }}
         run: python scripts/run_daily_update.py

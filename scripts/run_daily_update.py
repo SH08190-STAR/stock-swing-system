@@ -14,6 +14,7 @@ update.py — 일일 자동 갱신 파이프라인 (GitHub Actions가 호출)
 오류가 나도 전체가 멈추지 않게 단계별 try로 감싸고, 관리자 알림을 보낸다.
 """
 from __future__ import annotations
+import os
 import datetime as dt
 import traceback
 
@@ -43,8 +44,9 @@ def main():
         print("거래일 판정 실패 — 종료")
         return
 
-    # 오늘이 거래일이 아니면(주말/공휴일) 스킵
-    if end != today_kst:
+    # 오늘이 거래일이 아니면(주말/공휴일) 스킵. 단 FORCE_RUN=1이면 강제 진행(수동 테스트용).
+    force = os.getenv("FORCE_RUN") == "1"
+    if end != today_kst and not force:
         # 단, 장 마감 직후가 아니라 '오늘이 휴장'인 경우만 스킵.
         # end가 과거이고 오늘이 주말/공휴일이면 갱신 불필요.
         if today_kst.weekday() >= 5 or end < today_kst:
@@ -52,6 +54,8 @@ def main():
             # 휴장일엔 조용히 종료(알림 X). 필요하면 아래 주석 해제.
             # notifier.send(f"휴장일({today_kst}) — 갱신 스킵")
             return
+    if force:
+        print(f"FORCE_RUN — 거래일 판정 무시하고 최근 거래일 {end} 기준으로 강제 실행")
 
     print(f"기준 거래일: {end}")
 

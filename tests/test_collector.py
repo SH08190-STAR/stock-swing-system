@@ -9,6 +9,7 @@ from app import config
 
 def test_fetch_fallback_to_hold(monkeypatch):
     # pykrx/FDR 모두 실패 시 예외 없이 hold 반환
+    monkeypatch.setattr(config, "DATA_GO_KR_KEY", "")  # 공공API 비활성 → pykrx/fdr 경로만
     monkeypatch.setattr(collector, "_fetch_pykrx", lambda *a, **k: None)
     monkeypatch.setattr(collector, "_fetch_fdr", lambda *a, **k: None)
     monkeypatch.setattr(collector.time, "sleep", lambda *_: None)
@@ -20,6 +21,7 @@ def test_fetch_fallback_to_hold(monkeypatch):
 def test_fetch_primary_success(monkeypatch):
     df = pd.DataFrame({"close": [1], "volume": [1], "value": [1]},
                       index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(config, "DATA_GO_KR_KEY", "")  # 공공API 비활성 → pykrx가 주 소스
     monkeypatch.setattr(collector, "_fetch_pykrx", lambda *a, **k: df)
     monkeypatch.setattr(collector.time, "sleep", lambda *_: None)
     r = collector.fetch_stock("042700", "한미반도체", "KOSPI", dt.date(2026, 6, 19))
@@ -72,6 +74,7 @@ def test_datagokr_is_primary_when_key_set(monkeypatch):
 def test_fetch_fallback_to_secondary(monkeypatch):
     df = pd.DataFrame({"close": [1], "volume": [1], "value": [1], "value_estimated": [True]},
                       index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(config, "DATA_GO_KR_KEY", "")  # 공공API 비활성 → pykrx→fdr 폴백
     monkeypatch.setattr(collector, "_fetch_pykrx", lambda *a, **k: None)  # 주 실패
     monkeypatch.setattr(collector, "_fetch_fdr", lambda *a, **k: df)       # 예비 성공
     monkeypatch.setattr(collector.time, "sleep", lambda *_: None)
