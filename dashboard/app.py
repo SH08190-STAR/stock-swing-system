@@ -663,6 +663,69 @@ def render_trade_tab():
             except Exception as e:
                 st.error(f"삭제 실패: {e}")
 
+        # 선택 기록 수정 — 기존값 prefill, id 기준 update (모바일 고려해 expander로 접음)
+        with st.expander(f"✏️ 선택 기록 수정 — {r.get('record_date')} {r.get('symbol')}"):
+            def _f(k):
+                v = r.get(k)
+                return float(v) if v is not None else 0.0
+            try:
+                _d0 = dt.date.fromisoformat(str(r.get("record_date")))
+            except (ValueError, TypeError):
+                _d0 = dt.date.today()
+            with st.form(f"tr_edit_{r['id']}"):
+                c1, c2, c3 = st.columns(3)
+                g_date = c1.date_input("날짜", value=_d0)
+                g_sym = c2.text_input("티커 (본주)", value=r.get("symbol") or "")
+                g_lev = c3.text_input("레버리지 ETF명(티커)", value=r.get("leverage_symbol") or "")
+                e1, e2, e3, e4 = st.columns(4)
+                g_e1 = e1.number_input("1차 진입", min_value=0.0, value=_f("entry1"))
+                g_e2 = e2.number_input("2차 진입", min_value=0.0, value=_f("entry2"))
+                g_e3 = e3.number_input("3차 진입", min_value=0.0, value=_f("entry3"))
+                g_e4 = e4.number_input("4차 진입", min_value=0.0, value=_f("entry4"))
+                t1c, t2c, t3c = st.columns(3)
+                g_tp1 = t1c.number_input("1차 익절", min_value=0.0, value=_f("tp1"))
+                g_tp2 = t2c.number_input("2차 익절", min_value=0.0, value=_f("tp2"))
+                g_stop = t3c.number_input("손절가", min_value=0.0, value=_f("stop"))
+                r1c, r2c, r3c, r4c = st.columns(4)
+                g_r1 = r1c.number_input("1차 리스크", min_value=0.0, value=_f("risk1"))
+                g_r2 = r2c.number_input("2차 리스크", min_value=0.0, value=_f("risk2"))
+                g_r3 = r3c.number_input("3차 리스크", min_value=0.0, value=_f("risk3"))
+                g_r4 = r4c.number_input("4차 리스크", min_value=0.0, value=_f("risk4"))
+                g_memo = st.text_input("메모", value=r.get("memo") or "")
+                if r.get("status") == "completed":
+                    p1c, p2c, p3c, p4c = st.columns(4)
+                    g_p1 = p1c.number_input("1차 익절 수익", value=_f("realized_tp1_profit"))
+                    g_p2 = p2c.number_input("2차 익절 수익", value=_f("realized_tp2_profit"))
+                    g_ps = p3c.number_input("손절액", value=_f("realized_stop_loss"))
+                    g_pt = p4c.number_input("총 손익", value=_f("realized_total_pnl"))
+                else:
+                    g_p1, g_p2, g_ps, g_pt = _f("realized_tp1_profit"), _f("realized_tp2_profit"), \
+                        _f("realized_stop_loss"), _f("realized_total_pnl")
+                if st.form_submit_button("💾 수정 저장"):
+                    if not g_sym.strip():
+                        st.error("티커를 입력하세요.")
+                    else:
+                        payload = {
+                            "id": r["id"],
+                            "record_date": g_date.isoformat(),
+                            "symbol": g_sym.strip().upper(),
+                            "leverage_symbol": g_lev.strip().upper() or None,
+                            "entry1": z(g_e1), "entry2": z(g_e2), "entry3": z(g_e3), "entry4": z(g_e4),
+                            "tp1": z(g_tp1), "tp2": z(g_tp2), "stop": z(g_stop),
+                            "risk1": z(g_r1), "risk2": z(g_r2), "risk3": z(g_r3), "risk4": z(g_r4),
+                            "realized_tp1_profit": g_p1 if g_p1 else None,
+                            "realized_tp2_profit": g_p2 if g_p2 else None,
+                            "realized_stop_loss": g_ps if g_ps else None,
+                            "realized_total_pnl": g_pt if g_pt else None,
+                            "memo": g_memo.strip() or None,
+                        }
+                        try:
+                            db.upsert_trade_record(payload)
+                            st.toast(f"{payload['symbol']} 기록 수정됨")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"수정 실패: {e}")
+
         if status == "completed":
             st.caption("완료 손익(1차 MVP: 수동 입력 — 익절 비중 규칙 확정 후 자동화 예정)")
             q1, q2, q3, q4, q5 = st.columns([1, 1, 1, 1, 0.8])

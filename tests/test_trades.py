@@ -155,6 +155,32 @@ def test_upsert_update_when_id(monkeypatch):
     assert rid == "abc"
 
 
+def test_edit_payload_updates_all_fields(monkeypatch):
+    """수정 폼 payload(id 포함, 가격/리스크/메모/완료손익) → update 경로로 전체 전달."""
+    calls = _patch(monkeypatch)
+    payload = {
+        "id": "rec-1", "record_date": "2026-07-10", "symbol": "NVDA",
+        "leverage_symbol": "NVDL",
+        "entry1": 195.0, "entry2": 185.0, "entry3": None, "entry4": None,
+        "tp1": 220.0, "tp2": 240.0, "stop": 155.0,
+        "risk1": 80.0, "risk2": 80.0, "risk3": None, "risk4": None,
+        "realized_tp1_profit": 120.5, "realized_tp2_profit": None,
+        "realized_stop_loss": -30.0, "realized_total_pnl": 90.5,
+        "memo": "수정 테스트",
+    }
+    rid = db.upsert_trade_record(payload)
+    ups = [c for c in calls if c[0] == "update"]
+    assert len(ups) == 1 and rid == "rec-1"
+    body = ups[0][2]
+    assert body["symbol"] == "NVDA" and body["entry1"] == 195.0
+    assert body["stop"] == 155.0 and body["risk2"] == 80.0
+    assert body["realized_tp1_profit"] == 120.5
+    assert body["realized_stop_loss"] == -30.0          # 음수 손익도 그대로 전달
+    assert body["memo"] == "수정 테스트"
+    assert "id" not in body and ("eq", "id", "rec-1") in calls
+    assert not any(c[0] == "insert" for c in calls)      # 수정은 insert 안 탐
+
+
 def test_delete_trade_record(monkeypatch):
     calls = _patch(monkeypatch)
     db.delete_trade_record("abc")
