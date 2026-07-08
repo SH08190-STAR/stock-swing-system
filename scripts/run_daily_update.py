@@ -30,6 +30,42 @@ def now_kst_str() -> str:
     return (dt.datetime.utcnow() + dt.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
 
 
+def save_foreign(end, updated_at, last_ok=""):
+    """
+    해외 종목(표시용) 수집 후 기존 DB 구조에 저장.
+    - 일봉: 기존 db.save_ohlcv 재사용(prices 테이블)
+    - 현재가: 기존 db.save_classification 재사용, classification="global" 고정
+      (해외는 분류 대상이 아니라 '표시 대상'. 한국 분류 로직과 혼동 방지용 고정값)
+    - status!=ok / ohlcv 없음 / 0·None·NaN close 는 저장하지 않는다.
+    반환: (저장 종목 수, 저장 일봉 행수). 호출측에서 try/except로 격리한다.
+    """
+    g_stocks = watchlist.all_global_stocks()
+    foreign = collector.collect_foreign(g_stocks, end)
+    f_days, f_rows = 0, []
+    for r in foreign:
+        if r.get("status") != "ok" or r.get("ohlcv") is None:
+            continue
+        close = r.get("close")
+        if close is None or close != close or close <= 0:   # None / NaN / 0 제외
+            continue
+        try:
+            f_days += db.save_ohlcv(r["code"], r.get("market", ""), r["ohlcv"])
+        except Exception as e:
+            db.log_error(f"해외일봉:{r['code']}", str(e), "건너뜀", last_ok)
+        f_rows.append({
+            "code": r["code"], "name": r.get("name", r["code"]),
+            "market": r.get("market", ""),
+            "origin_sector": r.get("origin_sector", ""),
+            "classification": "global",      # 해외 = 표시 전용(분류 미적용)
+            "close": close, "change_pct": r.get("change_pct"),
+            "estimated": True,               # FDR 근사 거래대금 포함
+            "reason": "해외 표시용(분류 미적용)",
+        })
+    if f_rows:
+        db.save_classification(f_rows, end.isoformat(), updated_at)
+    return len(f_rows), f_days
+
+
 def main():
     config.validate_for_collector()
     last_ok = db.get_meta("last_ok_update")
@@ -116,6 +152,14 @@ def main():
 
     print(f"완료 — 단기스윙 {total_swing} / 보류 {hold_count} / 일봉 {saved_days}행 저장")
     print(f"변경: 신규 {len(changes['new_swing'])} / 복귀 {len(changes['back_to_sector'])} / 보류 {len(changes['new_hold'])}")
+
+    # 9) 해외 종목(표시용) 수집·저장 — 분류 미적용. 전체/개별 실패해도 한국 결과를 유지한다.
+    try:
+        f_n, f_days = save_foreign(end, updated_at, last_ok)
+        print(f"해외 표시용 저장 — 종목 {f_n} / 일봉 {f_days}행")
+    except Exception as e:
+        db.log_error("해외수집", str(e), "건너뜀", db.get_meta("last_ok_update"))
+        print("해외 수집 단계 실패(한국 결과는 유지):", e)
 
 
 if __name__ == "__main__":

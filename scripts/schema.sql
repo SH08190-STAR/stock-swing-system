@@ -65,3 +65,14 @@ create table if not exists meta (
     key    text primary key,
     value  text
 );
+
+-- 6) 관심가 (종목당 단일 관심가 — 사용자 입력값 영구저장)
+-- 수집/분류 파이프라인과 독립. watchlist.csv 에는 넣지 않고 여기로 분리한다.
+-- symbol 은 watchlist.symbol / stocks.code 와 동일한 값(한국 6자리 코드 또는 해외 티커).
+-- 1인 사용자 기준이라 user_id 없음. 추후 note/is_active/band_low/band_high/alert_enabled 확장 가능.
+create table if not exists stock_targets (
+    symbol        text primary key,         -- 종목코드/티커 (stocks.code 와 동일)
+    target_price  numeric not null,         -- 관심가(원)
+    created_at    timestamptz default now(),
+    updated_at    timestamptz default now()
+);

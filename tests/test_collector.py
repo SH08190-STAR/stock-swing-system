@@ -71,6 +71,62 @@ def test_datagokr_is_primary_when_key_set(monkeypatch):
     assert r["source"] == "datagokr"
 
 
+def _fdr_df():
+    """FDR 형태 합성 일봉(로직 검증 전용 — 실제 시세 아님)."""
+    idx = [dt.date(2026, 6, 17), dt.date(2026, 6, 18), dt.date(2026, 6, 19)]
+    return pd.DataFrame({
+        "close": [100.0, 105.0, 110.0],
+        "volume": [10, 20, 30],
+        "value": [1000.0, 2100.0, 3300.0],
+        "value_estimated": [True, True, True],
+    }, index=idx)
+
+
+def test_fetch_foreign_ok(monkeypatch):
+    # FDR 정상 df → 최신/이전 종가·등락률 계산, status ok
+    monkeypatch.setattr(collector, "_fetch_fdr", lambda *a, **k: _fdr_df())
+    r = collector.fetch_foreign("AAPL", "Apple", "NASDAQ", dt.date(2026, 6, 19))
+    assert r["status"] == "ok"
+    assert r["code"] == "AAPL" and r["source"] == "fdr"
+    assert r["close"] == 110.0
+    assert r["prev_close"] == 105.0
+    assert r["change_pct"] == round((110.0 - 105.0) / 105.0 * 100, 2)  # +4.76
+    assert r["ohlcv"] is not None and len(r["ohlcv"]) == 3
+
+
+def test_fetch_foreign_empty_is_hold(monkeypatch):
+    # 빈 데이터 → 예외 없이 hold, ohlcv None
+    monkeypatch.setattr(collector, "_fetch_fdr", lambda *a, **k: None)
+    r = collector.fetch_foreign("ZZZZ", "없는종목", "NASDAQ", dt.date(2026, 6, 19))
+    assert r["status"] == "hold"
+    assert r["ohlcv"] is None
+    assert r["close"] is None
+
+
+def test_fetch_foreign_exception_safe(monkeypatch):
+    # FDR 호출 중 예외 → 전체로 안 터지고 hold 반환
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(collector, "_fetch_fdr", boom)
+    r = collector.fetch_foreign("AAPL", "Apple", "NASDAQ", dt.date(2026, 6, 19))
+    assert r["status"] == "hold"
+    assert r["ohlcv"] is None
+    assert "fdr" in r["reason"]
+
+
+def test_collect_foreign_iterates(monkeypatch):
+    monkeypatch.setattr(collector, "_fetch_fdr", lambda *a, **k: _fdr_df())
+    monkeypatch.setattr(collector.time, "sleep", lambda *_: None)
+    stocks = [
+        {"ticker": "AAPL", "name": "Apple", "market": "NASDAQ", "cc": "US", "origin_sector": "M7"},
+        {"ticker": "NVDA", "name": "NVIDIA", "market": "NASDAQ", "cc": "US", "origin_sector": "M7"},
+    ]
+    out = collector.collect_foreign(stocks, dt.date(2026, 6, 19))
+    assert len(out) == 2
+    assert all(x["status"] == "ok" for x in out)
+    assert out[0]["country"] == "US" and out[0]["origin_sector"] == "M7"
+
+
 def test_fetch_fallback_to_secondary(monkeypatch):
     df = pd.DataFrame({"close": [1], "volume": [1], "value": [1], "value_estimated": [True]},
                       index=[dt.date(2026, 6, 19)])

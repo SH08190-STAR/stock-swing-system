@@ -253,6 +253,76 @@ def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
     return results
 
 
+# ── 해외 종목 가격 수집 (표시용, 분류 미적용) ────────────────
+def fetch_foreign(symbol: str, name: str | None = None,
+                  market: str | None = None, end: dt.date | None = None) -> dict:
+    """
+    해외 티커 1개의 최근 6개월 일봉을 FDR로 수집(표시 전용).
+    한국 fetch_stock 과 같은 형태(code/name/market/ohlcv/source/status/reason)에
+    현재가 표시용 close/prev_close/change_pct 를 더해 반환한다.
+    실패/빈 데이터여도 예외를 던지지 않고 status="hold" 로 안전 반환한다.
+    분류는 적용하지 않으며, 저장 단계에서 classification="global" 로 처리할 예정.
+    """
+    if end is None:
+        end = latest_trading_day() or dt.date.today()
+    start = end - relativedelta(months=config.LOOKBACK_MONTHS)
+
+    base = {
+        "code": symbol, "name": name or symbol, "market": market or "",
+        "ohlcv": None, "source": "fdr",
+        "status": "hold", "reason": "",
+        "close": None, "prev_close": None, "change_pct": None,
+    }
+
+    try:
+        df = _fetch_fdr(symbol, start, end)   # FDR OHLCV (close/volume/value[추정])
+    except Exception as e:
+        base["reason"] = f"fdr: {type(e).__name__} {e}"
+        return base
+
+    if df is None or len(df) == 0 or "close" not in df.columns:
+        base["reason"] = "데이터 없음"
+        return base
+
+    closes = df["close"].dropna()
+    if len(closes) == 0:
+        base["reason"] = "종가 없음"
+        return base
+
+    latest = float(closes.iloc[-1])
+    prev = float(closes.iloc[-2]) if len(closes) > 1 else None
+    change = round((latest - prev) / prev * 100, 2) if prev else None
+
+    base.update({
+        "ohlcv": df, "status": "ok", "reason": "",
+        "close": latest, "prev_close": prev, "change_pct": change,
+    })
+    return base
+
+
+def collect_foreign(stocks: list[dict], end: dt.date | None = None) -> list[dict]:
+    """
+    워치리스트 해외 종목 전체 수집(표시용).
+    stocks: watchlist.all_global_stocks() 결과(ticker/name/market/cc/origin_sector).
+    실패 종목은 status="hold"로 건너뛰며 파이프라인을 멈추지 않는다.
+    """
+    if end is None:
+        end = latest_trading_day() or dt.date.today()
+    results = []
+    n = len(stocks)
+    for i, s in enumerate(stocks, 1):
+        ticker = s.get("ticker") or s.get("code") or s.get("symbol")
+        r = fetch_foreign(ticker, s.get("name"), s.get("market"), end)
+        r["origin_sector"] = s.get("origin_sector", "")
+        r["country"] = s.get("cc") or s.get("country", "")
+        results.append(r)
+        time.sleep(config.REQUEST_SLEEP_SEC)
+        if i % 10 == 0 or i == n:
+            ok = sum(1 for x in results if x["status"] == "ok")
+            print(f"  해외 수집 {i}/{n} (성공 {ok})")
+    return results
+
+
 if __name__ == "__main__":
     # 단독 실행: 거래일 + 종목 1개 테스트
     d = latest_trading_day()

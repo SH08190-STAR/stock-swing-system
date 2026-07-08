@@ -26,6 +26,7 @@ if _ROOT not in sys.path:
 sys.path[:] = [p for p in sys.path if os.path.abspath(p) != _HERE]
 
 import io
+import html
 import datetime as dt
 import pandas as pd
 import streamlit as st
@@ -107,11 +108,267 @@ def csv_download(df: pd.DataFrame, label: str, fname: str):
                        file_name=fname, mime="text/csv")
 
 
+def get_currency(row) -> str:
+    """종목의 표시 통화 판별. 환율 변환은 하지 않는다(현지통화 그대로).
+    한국(country=KR 또는 KOSPI/KOSDAQ/KONEX) → KRW, 그 외(NASDAQ/NYSE/AMEX 등) → USD."""
+    country = str(row.get("country") or "").upper()
+    market = str(row.get("market") or "").upper()
+    if country in ("KR", "KOREA", "한국") or market in ("KOSPI", "KOSDAQ", "KONEX"):
+        return "KRW"
+    return "USD"
+
+
+def format_price(value, currency: str) -> str:
+    """가격 표시: KRW는 '78,000원'(소수 없음), USD는 '$195.74'(소수 2자리)."""
+    if value is None or pd.isna(value):
+        return "—"
+    if currency == "KRW":
+        return f"{float(value):,.0f}원"
+    return f"${float(value):,.2f}"
+
+
+def current_sector(row) -> str:
+    """종목의 현재 섹터: swing→단기스윙, hold→확인 보류, 그 외→기존 섹터."""
+    c = row.get("classification")
+    if c == "swing":
+        return "단기스윙"
+    if c == "hold":
+        return "확인 보류"
+    return row.get("origin_sector") or "(미분류)"
+
+
+@st.cache_data(ttl=600)
+def load_prices(code: str) -> pd.DataFrame:
+    """선택 종목의 일별 시세(prices 테이블)를 읽는다.
+    database.py는 수정하지 않고 기존 공개 client()만 사용한다(읽기 전용)."""
+    if not code:
+        return pd.DataFrame()
+    try:
+        res = (db.client().table("prices")
+               .select("date,close,value")
+               .eq("code", code).order("date").execute())
+        df = pd.DataFrame(res.data or [])
+        if not df.empty and "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+# 종목 로고 매핑(심볼→도메인). 나중에 별도 데이터(JSON/CSV)로 쉽게 분리 가능.
+# 무료·무키 favicon 서비스(google s2)를 사용하므로 실패해도 fallback 뱃지로 대체된다.
+_LOGO_DOMAINS = {
+    # ── M7 ──
+    "AAPL": "apple.com", "MSFT": "microsoft.com", "NVDA": "nvidia.com",
+    "GOOGL": "google.com", "GOOG": "google.com", "AMZN": "amazon.com",
+    "META": "meta.com", "TSLA": "tesla.com",
+
+    # ── 글로벌 대형주(공식 도메인 확실한 것만) ──
+    "AVGO": "broadcom.com", "ORCL": "oracle.com", "PLTR": "palantir.com",
+    "NFLX": "netflix.com", "AMD": "amd.com", "TSM": "tsmc.com",
+    "ASML": "asml.com", "ARM": "arm.com", "IONQ": "ionq.com",
+    "IREN": "iren.com", "NVO": "novonordisk.com", "LLY": "lilly.com",
+    "JPM": "jpmorganchase.com", "V": "visa.com", "MA": "mastercard.com",
+    "COIN": "coinbase.com", "MSTR": "microstrategy.com", "CRWD": "crowdstrike.com",
+    "SNOW": "snowflake.com", "SHOP": "shopify.com", "UBER": "uber.com",
+    "ABNB": "airbnb.com", "DIS": "disney.com", "COST": "costco.com",
+    "WMT": "walmart.com",
+
+    # ── 워치리스트 내 기타 해외(확실한 도메인) ──
+    "TXN": "ti.com", "QCOM": "qualcomm.com", "MU": "micron.com",
+    "MRVL": "marvell.com", "LRCX": "lamresearch.com", "TER": "teradyne.com",
+    "DELL": "dell.com", "SMCI": "supermicro.com", "VRT": "vertiv.com",
+    "ANET": "arista.com", "NOW": "servicenow.com", "TMUS": "t-mobile.com",
+    "NEE": "nexteraenergy.com", "CEG": "constellationenergy.com",
+    "LMT": "lockheedmartin.com", "BA": "boeing.com", "NKE": "nike.com",
+    "LULU": "lululemon.com", "CROX": "crocs.com", "HOOD": "robinhood.com",
+    "UNH": "unitedhealthgroup.com", "MNST": "monsterenergy.com",
+    "ETN": "eaton.com", "ALB": "albemarle.com", "OXY": "oxy.com",
+    "VLO": "valero.com", "PWR": "quantaservices.com", "DOCN": "digitalocean.com",
+    "PLUG": "plugpower.com", "RKLB": "rocketlabusa.com", "JOBY": "jobyaviation.com",
+    "NTRA": "natera.com", "TEM": "tempus.com", "CB": "chubb.com",
+    "O": "realtyincome.com", "GPN": "globalpayments.com", "FAST": "fastenal.com",
+    "ROL": "rollins.com",
+
+    # ── 한국 주요 종목(코드 기준, 공식 도메인 확실한 것만) ──
+    "035420": "naver.com",          # NAVER
+    "017670": "sktelecom.com",      # SK텔레콤
+    "018260": "samsungsds.com",     # 삼성SDS
+    "064400": "lgcns.com",          # LG CNS
+    "009150": "samsungsem.com",     # 삼성전기
+    "373220": "lgensol.com",        # LG에너지솔루션
+    "454910": "doosanrobotics.com", # 두산로보틱스
+    "034020": "doosanenerbility.com",  # 두산에너빌리티
+    "033780": "ktng.com",           # KT&G
+    "003490": "koreanair.com",      # 대한항공
+    "012330": "mobis.com",          # 현대모비스
+    "004170": "shinsegae.com",      # 신세계
+    "003230": "samyangfoods.com",   # 삼양식품
+    "005490": "posco.com",          # POSCO홀딩스
+    "010120": "ls-electric.com",    # LS ELECTRIC
+    "042700": "hanmisemiconductor.com",  # 한미반도체
+    # 워치리스트엔 아직 없지만 추후 편입 대비(확실한 도메인만)
+    "005930": "samsung.com",        # 삼성전자
+    "000660": "skhynix.com",        # SK하이닉스
+    "005380": "hyundai.com",        # 현대차
+    "000270": "kia.com",            # 기아
+    "035720": "kakaocorp.com",      # 카카오
+    "207940": "samsungbiologics.com",  # 삼성바이오로직스
+    "068270": "celltrion.com",      # 셀트리온
+    "012450": "hanwhaaerospace.com",   # 한화에어로스페이스
+}
+
+_BADGE_PALETTE = ["#4F46E5", "#0EA5E9", "#10B981", "#F59E0B",
+                  "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6"]
+
+
+def get_logo_url(symbol: str, name: str | None = None, market: str | None = None) -> str | None:
+    """종목 로고 URL. 매핑된 해외 종목은 favicon URL, 없으면 None(→fallback 뱃지).
+    유료/키 필요한 서비스는 쓰지 않는다. 매핑만 늘리면 커버리지가 확장된다."""
+    dom = _LOGO_DOMAINS.get(str(symbol or "").upper())
+    if dom:
+        return f"https://www.google.com/s2/favicons?domain={dom}&sz=64"
+    return None
+
+
+def _badge_color(key: str) -> str:
+    s = str(key or "?")
+    return _BADGE_PALETTE[sum(ord(c) for c in s) % len(_BADGE_PALETTE)]
+
+
+def _card_header_html(code: str, name: str, country: str, market: str, sector: str) -> str:
+    """카드 상단(로고/뱃지 + 종목명 + 메타 + 섹터 뱃지) HTML. 로고 실패해도 카드 유지."""
+    e = html.escape
+    url = get_logo_url(code, name, market)
+    if url:
+        logo = (f"<img src='{e(url)}' alt='' "
+                "style='width:34px;height:34px;border-radius:8px;object-fit:contain;"
+                "background:#fff;border:1px solid #e5e7eb;flex:none;'>")
+    else:
+        ch = e((name or code or "?")[:1])
+        logo = (f"<div style='width:34px;height:34px;border-radius:8px;background:{_badge_color(code or name)};"
+                "color:#fff;display:flex;align-items:center;justify-content:center;"
+                "font-weight:600;font-size:15px;flex:none;'>" + ch + "</div>")
+    return (
+        "<div style='display:flex;align-items:center;gap:10px;'>"
+        + logo
+        + "<div style='flex:1;min-width:0;'>"
+        + f"<div style='font-size:16px;font-weight:600;line-height:1.2;'>{e(name)} "
+        + f"<span style='color:#9ca3af;font-weight:400;font-size:13px;'>{e(code)}</span></div>"
+        + f"<div style='font-size:12px;color:#6b7280;'>{e(country)} · {e(market)}</div>"
+        + "</div>"
+        + f"<span style='background:#eef2ff;color:#4338ca;padding:3px 10px;border-radius:12px;"
+        + f"font-size:12px;white-space:nowrap;flex:none;'>{e(sector)}</span>"
+        + "</div>"
+    )
+
+
+def render_stock_card(row: dict, keyns: str = "map"):
+    """종목 1개를 상세 카드로 표시: 기본정보 + 현재가 + 관심가/이격률 + 일봉(지연 로딩).
+    관심가는 세션 위젯 상태로만 유지하고 영구 저장하지 않는다(MVP)."""
+    code = str(row.get("code", ""))
+    name = str(row.get("name", ""))
+    country = row.get("country") or "—"
+    market = row.get("market") or "—"
+    sector = current_sector(row)
+    is_kr = country == "KR"
+    close = row.get("close")
+    has_price = close is not None and not pd.isna(close)
+
+    with st.container(border=True):
+        # 헤더: 로고/뱃지 + 종목명 + 국가/시장 + 현재섹터 뱃지
+        st.markdown(_card_header_html(code, name, country, market, sector),
+                    unsafe_allow_html=True)
+
+        currency = get_currency(row)   # KRW/USD — 환율 변환 없이 현지통화 그대로
+        cur_unit = "원" if currency == "KRW" else "$"
+
+        left, right = st.columns([1, 1])
+        # 현재가 (통화별 포맷: 78,000원 / $195.74)
+        if has_price:
+            left.metric("현재가", format_price(close, currency))
+        else:
+            left.metric("현재가", "—")
+            left.caption("💱 해외 현재가 연동 전" if not is_kr else "가격 데이터 없음")
+
+        # 관심가 입력 — 저장값이 있으면 기본값으로 prefill(세션 시드). 종목별 고유 key.
+        # DB의 target_price는 통화 무관 numeric 그대로(해석은 country/market 기준).
+        tkey = f"{keyns}_t_{code}"
+        saved = st.session_state.get("targets", {}).get(code)
+        if tkey not in st.session_state:
+            st.session_state[tkey] = float(saved) if saved else 0.0
+        cur_target = right.number_input(
+            f"관심가 입력({cur_unit})", min_value=0.0,
+            step=100.0 if currency == "KRW" else 0.5, key=tkey)
+
+        # 이격률 (현재 입력값 기준). 색상: |이격률|≤5 빨강(근접), >5 초록.
+        if has_price and cur_target > 0:
+            gap = (float(close) - float(cur_target)) / float(cur_target) * 100.0
+            near = abs(gap) <= 5
+            color = "#DC2626" if near else "#16A34A"
+            meaning = "관심가 근접" if near else "거리 있음"
+            right.markdown(
+                f"<div style='font-size:12px;color:#6b7280;margin-bottom:-6px;'>이격률 · {meaning}</div>"
+                f"<div style='font-size:22px;font-weight:600;color:{color};'>{gap:+.2f}%</div>",
+                unsafe_allow_html=True,
+            )
+        elif not has_price:
+            right.caption("현재가 연동 후 이격률 계산")
+        else:
+            right.caption("관심가 입력 시 이격률 표시")
+
+        # 저장 / 해제 (A안: 버튼 클릭 시에만 DB 반영) + 저장 상태 표시
+        b1, b2, b3 = st.columns([1, 1, 2])
+        if b1.button("💾 저장", key=f"{keyns}_save_{code}", use_container_width=True):
+            try:
+                if cur_target and cur_target > 0:
+                    db.set_target(code, float(cur_target))
+                    st.session_state.setdefault("targets", {})[code] = float(cur_target)
+                    st.toast(f"{name} 관심가 저장 · {format_price(cur_target, currency)}")
+                else:
+                    db.delete_target(code)
+                    st.session_state.setdefault("targets", {}).pop(code, None)
+                    st.toast("관심가가 0이라 해제 처리했어요. 값을 입력 후 저장하세요.")
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
+        if b2.button("✖ 해제", key=f"{keyns}_clear_{code}", use_container_width=True):
+            try:
+                db.delete_target(code)
+                st.session_state.setdefault("targets", {}).pop(code, None)
+                st.session_state[tkey] = 0.0
+                st.toast(f"{name} 관심가 해제됨")
+                st.rerun()
+            except Exception as e:
+                st.error(f"해제 실패: {e}")
+        saved_after = st.session_state.get("targets", {}).get(code)
+        b3.caption(f"💾 DB 저장값 {format_price(saved_after, currency)}" if saved_after else "미저장")
+
+        # 일봉 차트 (펼친 뒤 체크 시에만 조회 → 화면 가벼움)
+        with st.expander("📈 최근 6개월 일봉 차트"):
+            if not is_kr and not has_price:
+                st.caption("해외 종목 일봉은 2차 단계에서 연동 예정입니다.")
+            elif st.checkbox("차트 표시", key=f"{keyns}_c_{code}"):
+                pr = load_prices(code)
+                if pr.empty or "close" not in pr.columns:
+                    st.caption("가격 데이터 없음")
+                else:
+                    st.line_chart(
+                        pr.set_index("date")[["close"]].rename(columns={"close": "종가"}),
+                        height=220,
+                    )
+                    st.caption(f"최근 {len(pr)}거래일 종가 · DB prices 기준")
+
+
 def main():
     if not gate():
         return
 
     stocks, history, last_update, last_date = load_data()
+
+    # 관심가(stock_targets)를 세션에 1회 시드 — 이후 저장/해제로 in-place 갱신.
+    # 조회 실패해도 get_targets()가 {} 반환하므로 화면은 유지된다.
+    if "targets" not in st.session_state:
+        st.session_state["targets"] = db.get_targets()
 
     # 상단: 요약 + 마지막 최신화 시각 (메뉴 9)
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -166,14 +423,7 @@ def main():
     # 그 외(1,000억 초과)는 기존 섹터 유지. 워치리스트 원본(origin_sector)은 그대로 두고
     # 여기서 매 거래일 분류 결과로 현재 섹터만 산출한다(복귀 시 원래 섹터로 되돌리기 위함).
     def cur_cat_series(d):
-        def f(row):
-            c = row.get("classification")
-            if c == "swing":
-                return "단기스윙"
-            if c == "hold":
-                return "확인 보류"
-            return row.get("origin_sector") or "(미분류)"
-        return d.apply(f, axis=1)
+        return d.apply(current_sector, axis=1)
 
     # 표시용 컬럼 정리
     def view(df):
@@ -209,18 +459,36 @@ def main():
         st.dataframe(view(d), use_container_width=True, hide_index=True)
         csv_download(d, "⬇ 단기스윙 CSV", "zpick_swing.csv")
 
-    # 3) 섹터 구성 — "단기스윙"을 하나의 섹터로 맨 위에, 나머지는 기존 섹터별로
+    # 3) 섹터 구성 — 메뉴형 섹터맵: 메뉴(전체/단기스윙/M7/섹터) 선택 → 종목을 상세 카드로
     with tabs[2]:
-        d = apply_filters(stocks).copy()
-        d["__cat"] = cur_cat_series(d)
-        # 정렬: 단기스윙 먼저 → 기존 섹터(이름순) → 확인 보류 맨 뒤
+        base = apply_filters(stocks).copy()
+        base["__cat"] = cur_cat_series(base)
         order_key = lambda c: (c != "단기스윙", c == "확인 보류", str(c))
-        for cat in sorted(d["__cat"].dropna().unique(), key=order_key):
-            sub = d[d["__cat"] == cat]
-            label = "🔹 단기스윙 (1,000억 이하 · 섹터 통합)" if cat == "단기스윙" else cat
-            st.subheader(f"{label} — {len(sub)}종목")
-            st.dataframe(view(sub), use_container_width=True, hide_index=True)
-        csv_download(d.drop(columns="__cat").assign(현재섹터=cur_cat_series(d)),
+        cats_all = sorted(base["__cat"].dropna().unique(), key=order_key)
+        menu = ["전체"] + cats_all
+        default_idx = menu.index("단기스윙") if "단기스윙" in menu else 0
+        choice = st.radio("섹터 메뉴", menu, horizontal=True,
+                          index=default_idx, key="sector_menu")
+
+        if choice == "전체":
+            sub = base
+            title = f"📂 전체 — {len(sub)}종목"
+        else:
+            sub = base[base["__cat"] == choice]
+            label = "🔹 단기스윙 (1,000억 이하 · 섹터 통합)" if choice == "단기스윙" else f"🗂 {choice}"
+            title = f"{label} — {len(sub)}종목"
+        st.subheader(title)
+        st.divider()
+
+        if sub.empty:
+            st.info("해당 메뉴에 표시할 종목이 없습니다. (사이드바 필터를 확인하세요)")
+        else:
+            if len(sub) > 60:
+                st.caption(f"종목이 많아({len(sub)}개) 로딩이 다소 걸릴 수 있어요. 메뉴로 좁혀 보세요.")
+            for rec in sub.to_dict("records"):
+                render_stock_card(rec, keyns="map")
+
+        csv_download(base.drop(columns="__cat").assign(현재섹터=cur_cat_series(base)),
                      "⬇ 섹터구성 CSV (단기스윙 포함)", "zpick_categories.csv")
 
     # 4) 신규 편입 (오늘 history에서 swing 편입)

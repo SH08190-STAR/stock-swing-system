@@ -168,6 +168,43 @@ def load_history(limit: int = 500) -> list[dict]:
     return res.data or []
 
 
+# ── 관심가 (stock_targets) ──────────────────────────────────
+# 사용자 입력 관심가의 영구저장. 수집/분류 파이프라인과 독립. 종목당 1개(symbol PK).
+def get_targets() -> dict[str, float]:
+    """stock_targets 전체를 {symbol: target_price(float)} 로 반환.
+    데이터가 없거나 조회 실패 시 빈 dict(기존 get_* 안전 처리 스타일)."""
+    try:
+        res = client().table("stock_targets").select("symbol,target_price").execute()
+        out = {}
+        for r in (res.data or []):
+            v = _num(r.get("target_price"))
+            sym = r.get("symbol")
+            if sym and v is not None:
+                out[str(sym)] = v
+        return out
+    except Exception:
+        return {}
+
+
+def set_target(symbol: str, target_price: float) -> None:
+    """관심가 upsert(symbol 기준). 0 이하/None 이면 저장하지 않고 삭제(해제)로 처리.
+    created_at 은 DB default(now()) 유지, updated_at 만 갱신."""
+    if target_price is None or float(target_price) <= 0:
+        delete_target(symbol)
+        return
+    payload = {
+        "symbol": str(symbol),
+        "target_price": float(target_price),
+        "updated_at": dt.datetime.utcnow().isoformat(),
+    }
+    client().table("stock_targets").upsert(payload, on_conflict="symbol").execute()
+
+
+def delete_target(symbol: str) -> None:
+    """해당 symbol 의 관심가 삭제(해제 버튼용)."""
+    client().table("stock_targets").delete().eq("symbol", str(symbol)).execute()
+
+
 def _num(x):
     try:
         if x is None:
