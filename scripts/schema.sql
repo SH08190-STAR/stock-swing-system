@@ -76,3 +76,28 @@ create table if not exists stock_targets (
     created_at    timestamptz default now(),
     updated_at    timestamptz default now()
 );
+
+-- 7) 매매 기록 (국장/미장 × 대기중/진입/TP IN/완료 — 사용자 입력 매매 계획·진행)
+-- 레버리지 환산가는 저장하지 않고 화면에서 자동 계산(2배 고정 규칙).
+-- 완료 손익(realized_*)은 1차 MVP에서 수동 입력(익절 비중 규칙 확정 후 자동화 예정).
+create table if not exists trade_records (
+    id             uuid primary key default gen_random_uuid(),
+    market_group   text not null,        -- KR(국장) / US(미장)
+    status         text not null,        -- waiting / entered / tp_in / completed
+    record_date    date not null,
+    symbol         text not null,        -- 본주 티커/코드
+    leverage_symbol text,                -- 레버리지 ETF명(티커)
+    entry1 numeric, entry2 numeric, entry3 numeric, entry4 numeric,
+    tp1 numeric, tp2 numeric,
+    stop numeric,
+    risk1 numeric, risk2 numeric, risk3 numeric, risk4 numeric,
+    realized_tp1_profit numeric,         -- 1차 익절 수익(수동)
+    realized_tp2_profit numeric,         -- 2차 익절 수익(수동)
+    realized_stop_loss  numeric,         -- 손절액(수동)
+    realized_total_pnl  numeric,         -- 총 손익(수동)
+    memo text,
+    created_at timestamptz default now(),
+    updated_at timestamptz default now()
+);
+create index if not exists idx_trade_records_group_status
+    on trade_records(market_group, status);

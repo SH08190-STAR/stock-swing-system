@@ -205,6 +205,56 @@ def delete_target(symbol: str) -> None:
     client().table("stock_targets").delete().eq("symbol", str(symbol)).execute()
 
 
+# ── 매매 기록 (trade_records) ────────────────────────────────
+# 국장/미장 × 대기중/진입/TP IN/완료. 레버리지 환산가는 저장하지 않고 화면에서 계산.
+def list_trade_records(market_group: str | None = None,
+                       status: str | None = None):
+    """매매 기록 목록. 필터(market_group=KR/US, status=waiting/entered/tp_in/completed).
+    조회 실패(테이블 미존재 등) 시 None 반환 — 호출측이 생성 안내를 띄운다.
+    데이터가 없으면 빈 list."""
+    try:
+        q = client().table("trade_records").select("*")
+        if market_group:
+            q = q.eq("market_group", market_group)
+        if status:
+            q = q.eq("status", status)
+        res = q.order("record_date", desc=True).execute()
+        return res.data or []
+    except Exception:
+        return None
+
+
+def upsert_trade_record(rec: dict):
+    """id가 있으면 update, 없으면 insert. 반환: record id(신규 insert 시 DB 생성값)."""
+    payload = dict(rec)
+    payload["updated_at"] = dt.datetime.utcnow().isoformat()
+    rid = payload.pop("id", None)
+    if rid:
+        client().table("trade_records").update(payload).eq("id", str(rid)).execute()
+        return rid
+    res = client().table("trade_records").insert(payload).execute()
+    return (res.data or [{}])[0].get("id")
+
+
+def delete_trade_record(record_id) -> None:
+    client().table("trade_records").delete().eq("id", str(record_id)).execute()
+
+
+def get_latest_price(symbol: str):
+    """본주/ETF 최신 가격: stocks.close 우선 → prices 최신 close → None(안전)."""
+    try:
+        res = client().table("stocks").select("close").eq("code", str(symbol)).execute()
+        if res.data and res.data[0].get("close") is not None:
+            return float(res.data[0]["close"])
+        res = (client().table("prices").select("close").eq("code", str(symbol))
+               .order("date", desc=True).limit(1).execute())
+        if res.data and res.data[0].get("close") is not None:
+            return float(res.data[0]["close"])
+    except Exception:
+        pass
+    return None
+
+
 def _num(x):
     try:
         if x is None:

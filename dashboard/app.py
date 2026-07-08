@@ -359,6 +359,334 @@ def render_stock_card(row: dict, keyns: str = "map"):
                     st.caption(f"최근 {len(pr)}거래일 종가 · DB prices 기준")
 
 
+# ── 매매 기록 (trade_records) ────────────────────────────────
+TRADE_SQL = """create table if not exists trade_records (
+    id             uuid primary key default gen_random_uuid(),
+    market_group   text not null,
+    status         text not null,
+    record_date    date not null,
+    symbol         text not null,
+    leverage_symbol text,
+    entry1 numeric, entry2 numeric, entry3 numeric, entry4 numeric,
+    tp1 numeric, tp2 numeric,
+    stop numeric,
+    risk1 numeric, risk2 numeric, risk3 numeric, risk4 numeric,
+    realized_tp1_profit numeric,
+    realized_tp2_profit numeric,
+    realized_stop_loss  numeric,
+    realized_total_pnl  numeric,
+    memo text,
+    created_at timestamptz default now(),
+    updated_at timestamptz default now()
+);
+create index if not exists idx_trade_records_group_status
+    on trade_records(market_group, status);"""
+
+_ST_LABEL = {"waiting": "대기중", "entered": "진입", "tp_in": "TP IN", "completed": "완료"}
+_ST_CODE = {v: k for k, v in _ST_LABEL.items()}
+
+
+def lev_convert(etf_now, base_now, target):
+    """레버리지 ETF 환산가(2배 고정): etf_now × (1 + (target-base_now)/base_now × 2).
+    가격이 없거나(None/NaN) 0·음수면 계산하지 않고 None."""
+    try:
+        for v in (etf_now, base_now, target):
+            if v is None or pd.isna(v):
+                return None
+        etf_now, base_now, target = float(etf_now), float(base_now), float(target)
+        if etf_now <= 0 or base_now <= 0 or target <= 0:
+            return None
+        return etf_now * (1 + (target - base_now) / base_now * 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def calc_position_qty(entry_lev_price, stop_lev_price, risk_amount):
+    """계획 수량 = 진입 리스크 ÷ 주당 리스크(진입 환산가 − 손절 환산가).
+    일반 반올림(4.49→4, 4.50→5 — 파이썬 round는 은행가 방식이라 floor(x+0.5) 사용).
+    값 누락/주당 리스크 0 이하/리스크 0 이하면 None. 표시 전용(주문 기능 아님)."""
+    import math
+    try:
+        for v in (entry_lev_price, stop_lev_price, risk_amount):
+            if v is None or pd.isna(v):
+                return None
+        per_share = float(entry_lev_price) - float(stop_lev_price)
+        if per_share <= 0 or float(risk_amount) <= 0:
+            return None
+        return int(math.floor(float(risk_amount) / per_share + 0.5))
+    except (TypeError, ValueError):
+        return None
+
+
+@st.cache_data(ttl=600)
+def latest_price(symbol: str):
+    """본주/ETF 최신가: stocks→prices(DB) 우선, 없으면 FDR 1회 조회(캐시 10분)."""
+    if not symbol:
+        return None
+    p = db.get_latest_price(symbol)
+    if p:
+        return p
+    try:  # DB에 없는 레버리지 ETF 등 — FDR fallback (실패해도 화면 유지)
+        import FinanceDataReader as fdr
+        import datetime as _dt
+        end = _dt.date.today()
+        df = fdr.DataReader(symbol, (end - _dt.timedelta(days=14)).isoformat(), end.isoformat())
+        if df is not None and len(df) and "Close" in df.columns:
+            v = float(df["Close"].dropna().iloc[-1])
+            return v if v > 0 else None
+    except Exception:
+        pass
+    return None
+
+
+def _fmtp(v, currency):
+    return format_price(v, currency) if v is not None else "—"
+
+
+def _trade_calc(r: dict):
+    """기록 1건의 파생값 계산: 현재가·환산가·주당리스크·수량. 표시 전용."""
+    base_now = latest_price(r.get("symbol"))
+    etf_now = latest_price(r.get("leverage_symbol")) if r.get("leverage_symbol") else None
+    conv = lambda t: lev_convert(etf_now, base_now, t)
+    stop_lev = conv(r.get("stop"))
+    out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev, "conv": conv}
+    for i in (1, 2, 3, 4):
+        e_lev = conv(r.get(f"entry{i}"))
+        out[f"e{i}_lev"] = e_lev
+        out[f"qty{i}"] = calc_position_qty(e_lev, stop_lev, r.get(f"risk{i}"))
+    risks = [r.get(f"risk{i}") for i in (1, 2, 3, 4)]
+    out["total_risk"] = sum(float(x) for x in risks if x) or None
+    return out
+
+
+def _summary_table(records: list[dict], status: str, currency: str) -> pd.DataFrame:
+    """짧은 요약표(가로 스크롤 최소화). 상세는 아래 expander에서."""
+    rows = []
+    for r in records:
+        c = _trade_calc(r)
+        d = {
+            "날짜": r.get("record_date"), "티커": r.get("symbol"),
+            "ETF": r.get("leverage_symbol") or "—",
+            "본주 현재가": _fmtp(c["base_now"], currency),
+            "ETF 현재가": _fmtp(c["etf_now"], currency),
+            "손절": _fmtp(r.get("stop"), currency),
+            "손절 환산": _fmtp(c["stop_lev"], currency),
+            "총 계획 리스크": c["total_risk"],
+            "메모": r.get("memo") or "",
+        }
+        if status == "waiting":
+            d.update({"1차 진입": _fmtp(r.get("entry1"), currency),
+                      "1차 환산": _fmtp(c["e1_lev"], currency),
+                      "1차 수량": c["qty1"] if c["qty1"] is not None else "—"})
+        elif status == "entered":
+            nxt = next((i for i in (2, 3, 4) if r.get(f"entry{i}")), None)
+            d.update({
+                "다음 진입": _fmtp(r.get(f"entry{nxt}"), currency) if nxt else "—",
+                "다음 환산": _fmtp(c[f"e{nxt}_lev"], currency) if nxt else "—",
+                "다음 수량": (c[f"qty{nxt}"] if nxt and c[f"qty{nxt}"] is not None else "—"),
+                "1차 익절": _fmtp(r.get("tp1"), currency),
+                "2차 익절": _fmtp(r.get("tp2"), currency),
+            })
+        elif status == "tp_in":
+            d["2차 익절"] = _fmtp(r.get("tp2"), currency)
+        elif status == "completed":
+            d["총 손익"] = r.get("realized_total_pnl")
+        rows.append(d)
+    order = {
+        "waiting": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
+                    "1차 진입", "1차 환산", "1차 수량", "손절", "손절 환산", "총 계획 리스크", "메모"],
+        "entered": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
+                    "다음 진입", "다음 환산", "다음 수량", "1차 익절", "2차 익절",
+                    "손절", "손절 환산", "총 계획 리스크", "메모"],
+        "tp_in": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
+                  "2차 익절", "손절", "손절 환산", "총 계획 리스크", "메모"],
+        "completed": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
+                      "손절", "손절 환산", "총 계획 리스크", "총 손익", "메모"],
+    }[status]
+    return pd.DataFrame(rows)[order] if rows else pd.DataFrame(columns=order)
+
+
+def _render_trade_detail(r: dict, currency: str):
+    """기록 1건 상세 expander: 기본정보 / 진입계획(수량) / 익절·손절 / 완료손익."""
+    c = _trade_calc(r)
+    title = f"{r.get('record_date')} {r.get('symbol')} / {r.get('leverage_symbol') or '—'} / {_ST_LABEL.get(r.get('status'), r.get('status'))}"
+    with st.expander(f"📋 {title}"):
+        # 1. 기본 정보
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("본주 현재가", _fmtp(c["base_now"], currency))
+        b2.metric("ETF 현재가", _fmtp(c["etf_now"], currency))
+        b3.metric("시장", "국장" if r.get("market_group") == "KR" else "미장")
+        b4.metric("상태", _ST_LABEL.get(r.get("status"), "—"))
+        if r.get("memo"):
+            st.caption(f"📝 {r['memo']}")
+
+        # 2. 진입 계획 (환산가·주당 리스크·수량)
+        plan = []
+        for i in (1, 2, 3, 4):
+            e, e_lev, risk, qty = r.get(f"entry{i}"), c[f"e{i}_lev"], r.get(f"risk{i}"), c[f"qty{i}"]
+            if e is None and risk is None:
+                continue
+            per = (e_lev - c["stop_lev"]) if (e_lev is not None and c["stop_lev"] is not None) else None
+            plan.append({
+                "구분": f"{i}차", "본주 진입가": _fmtp(e, currency),
+                "ETF 환산가": _fmtp(e_lev, currency),
+                "손절 ETF 환산가": _fmtp(c["stop_lev"], currency),
+                "주당 리스크": _fmtp(per, currency) if per is not None else "—",
+                "입력 리스크": risk if risk is not None else "—",
+                "계산 수량": qty if qty is not None else "—",
+            })
+        if plan:
+            st.markdown("**진입 계획**")
+            st.dataframe(pd.DataFrame(plan), use_container_width=True, hide_index=True)
+
+        # 3. 익절/손절 (환산가 포함)
+        st.markdown("**익절 / 손절**")
+        t1, t2, t3 = st.columns(3)
+        t1.metric("1차 익절", _fmtp(r.get("tp1"), currency))
+        t1.caption(f"환산 {_fmtp(c['conv'](r.get('tp1')), currency)}")
+        t2.metric("2차 익절", _fmtp(r.get("tp2"), currency))
+        t2.caption(f"환산 {_fmtp(c['conv'](r.get('tp2')), currency)}")
+        t3.metric("손절", _fmtp(r.get("stop"), currency))
+        t3.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
+
+        # 4. 완료 손익 (완료 상태만)
+        if r.get("status") == "completed":
+            st.markdown("**완료 손익 (수동 입력값)**")
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("1차 익절 수익", r.get("realized_tp1_profit") if r.get("realized_tp1_profit") is not None else "—")
+            p2.metric("2차 익절 수익", r.get("realized_tp2_profit") if r.get("realized_tp2_profit") is not None else "—")
+            p3.metric("손절액", r.get("realized_stop_loss") if r.get("realized_stop_loss") is not None else "—")
+            p4.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
+
+
+def render_trade_tab():
+    mg_label = st.radio("시장", ["국장", "미장"], horizontal=True, key="tr_mg")
+    market_group = "KR" if mg_label == "국장" else "US"
+    currency = "KRW" if market_group == "KR" else "USD"
+    st_label = st.radio("상태", ["대기중", "진입", "TP IN", "완료"], horizontal=True, key="tr_st")
+    status = _ST_CODE[st_label]
+
+    records = db.list_trade_records(market_group, status)
+    if records is None:
+        st.warning("⚠️ trade_records 테이블이 아직 없습니다. Supabase SQL Editor에서 아래 SQL을 실행하세요.")
+        st.code(TRADE_SQL, language="sql")
+        return
+
+    z = lambda v: float(v) if v else None   # 폼의 0 입력은 None(미입력)으로 저장
+
+    # 새 기록 입력 폼
+    with st.expander(f"➕ 새 기록 추가 — {mg_label} · {st_label}", expanded=(len(records) == 0)):
+        with st.form(f"tr_form_{market_group}_{status}", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            f_date = c1.date_input("날짜", value=dt.date.today())
+            f_sym = c2.text_input("티커 (본주)", placeholder="예: 005490 / NVDA")
+            f_lev = c3.text_input("레버리지 ETF명(티커)", placeholder="예: TQQQ, NVDL")
+            e1, e2, e3, e4 = st.columns(4)
+            f_e1 = e1.number_input("1차 진입", min_value=0.0, key=None)
+            f_e2 = e2.number_input("2차 진입", min_value=0.0)
+            f_e3 = e3.number_input("3차 진입", min_value=0.0)
+            f_e4 = e4.number_input("4차 진입", min_value=0.0)
+            t1, t2, t3 = st.columns(3)
+            f_tp1 = t1.number_input("1차 익절", min_value=0.0)
+            f_tp2 = t2.number_input("2차 익절", min_value=0.0)
+            f_stop = t3.number_input("손절가", min_value=0.0)
+            r1, r2, r3, r4 = st.columns(4)
+            f_r1 = r1.number_input("1차 리스크", min_value=0.0)
+            f_r2 = r2.number_input("2차 리스크", min_value=0.0)
+            f_r3 = r3.number_input("3차 리스크", min_value=0.0)
+            f_r4 = r4.number_input("4차 리스크", min_value=0.0)
+            f_memo = st.text_input("메모", "")
+            if status == "completed":
+                p1, p2, p3, p4 = st.columns(4)
+                f_p1 = p1.number_input("1차 익절 수익", value=0.0)
+                f_p2 = p2.number_input("2차 익절 수익", value=0.0)
+                f_ps = p3.number_input("손절액", value=0.0)
+                f_pt = p4.number_input("총 손익", value=0.0)
+            else:
+                f_p1 = f_p2 = f_ps = f_pt = 0.0
+            if st.form_submit_button("💾 저장"):
+                if not f_sym.strip():
+                    st.error("티커를 입력하세요.")
+                else:
+                    rec = {
+                        "market_group": market_group, "status": status,
+                        "record_date": f_date.isoformat(), "symbol": f_sym.strip().upper(),
+                        "leverage_symbol": f_lev.strip().upper() or None,
+                        "entry1": z(f_e1), "entry2": z(f_e2), "entry3": z(f_e3), "entry4": z(f_e4),
+                        "tp1": z(f_tp1), "tp2": z(f_tp2), "stop": z(f_stop),
+                        "risk1": z(f_r1), "risk2": z(f_r2), "risk3": z(f_r3), "risk4": z(f_r4),
+                        "realized_tp1_profit": z(f_p1), "realized_tp2_profit": z(f_p2),
+                        "realized_stop_loss": f_ps if f_ps else None,
+                        "realized_total_pnl": f_pt if f_pt else None,
+                        "memo": f_memo.strip() or None,
+                    }
+                    try:
+                        db.upsert_trade_record(rec)
+                        st.toast(f"{rec['symbol']} 기록 저장됨")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"저장 실패: {e}")
+
+    # 요약표 + 기록별 상세 펼침
+    if records:
+        st.dataframe(_summary_table(records, status, currency),
+                     use_container_width=True, hide_index=True)
+        st.caption("환산가 = ETF 현재가 × (1 + 본주 변동률 × 2) · 수량 = 리스크 ÷ (진입환산 − 손절환산), 일반 반올림 · 계획 표시용")
+        for r in records:
+            _render_trade_detail(r, currency)
+    else:
+        st.info(f"{mg_label} · {st_label} 기록이 없습니다. 위에서 추가하세요.")
+
+    # 기록 관리(상태 변경 / 삭제 / 완료 손익 수동 입력)
+    if records:
+        st.divider()
+        st.markdown("**기록 관리**")
+        opts = {f"{r['record_date']} {r['symbol']} ({str(r['id'])[:8]})": r for r in records}
+        sel = st.selectbox("기록 선택", list(opts.keys()), key=f"tr_sel_{market_group}_{status}")
+        r = opts[sel]
+        m1, m2, m3 = st.columns([1.4, 1, 1])
+        new_label = m1.selectbox("상태 변경", list(_ST_CODE.keys()),
+                                 index=list(_ST_CODE.keys()).index(st_label),
+                                 key=f"tr_ns_{market_group}_{status}")
+        if m2.button("상태 적용", key=f"tr_apply_{market_group}_{status}"):
+            try:
+                db.upsert_trade_record({"id": r["id"], "status": _ST_CODE[new_label]})
+                st.toast(f"{r['symbol']} → {new_label}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"상태 변경 실패: {e}")
+        if m3.button("🗑 삭제", key=f"tr_del_{market_group}_{status}"):
+            try:
+                db.delete_trade_record(r["id"])
+                st.toast(f"{r['symbol']} 기록 삭제됨")
+                st.rerun()
+            except Exception as e:
+                st.error(f"삭제 실패: {e}")
+
+        if status == "completed":
+            st.caption("완료 손익(1차 MVP: 수동 입력 — 익절 비중 규칙 확정 후 자동화 예정)")
+            q1, q2, q3, q4, q5 = st.columns([1, 1, 1, 1, 0.8])
+            v1 = q1.number_input("1차 익절 수익", value=float(r.get("realized_tp1_profit") or 0.0),
+                                 key=f"tr_p1_{r['id']}")
+            v2 = q2.number_input("2차 익절 수익", value=float(r.get("realized_tp2_profit") or 0.0),
+                                 key=f"tr_p2_{r['id']}")
+            v3 = q3.number_input("손절액", value=float(r.get("realized_stop_loss") or 0.0),
+                                 key=f"tr_p3_{r['id']}")
+            v4 = q4.number_input("총 손익", value=float(r.get("realized_total_pnl") or 0.0),
+                                 key=f"tr_p4_{r['id']}")
+            if q5.button("손익 저장", key=f"tr_psave_{r['id']}"):
+                try:
+                    db.upsert_trade_record({
+                        "id": r["id"],
+                        "realized_tp1_profit": v1 or None, "realized_tp2_profit": v2 or None,
+                        "realized_stop_loss": v3 or None, "realized_total_pnl": v4 or None,
+                    })
+                    st.toast("손익 저장됨")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"손익 저장 실패: {e}")
+
+
 def main():
     if not gate():
         return
@@ -417,6 +745,7 @@ def main():
     tabs = st.tabs([
         "전체", "단기스윙", "섹터 구성", "신규 편입",
         "분류 이탈", "거래대금 순위", "변경 이력", "확인 보류",
+        "매매 기록",
     ])
 
     # 현재 분류 섹터: swing → "단기스윙"(하나의 섹터로 모음), hold → "확인 보류",
@@ -541,6 +870,10 @@ def main():
             "name":"종목명","code":"코드","market":"시장",
             "origin_sector":"기존섹터","reason":"사유","data_date":"기준일"}),
             use_container_width=True, hide_index=True)
+
+    # 9) 매매 기록 — 국장/미장 × 대기중/진입/TP IN/완료 + 레버리지 환산(2배 고정)
+    with tabs[8]:
+        render_trade_tab()
 
 
 if __name__ == "__main__":
