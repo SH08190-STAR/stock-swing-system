@@ -32,6 +32,20 @@ def test_lev_convert_formula():
     assert m.lev_convert(100.0, 50.0, 50.0) == 100.0
 
 
+def test_kst_now_str_format():
+    import re
+    m = _dash()
+    s = m.kst_now_str()
+    # 'YYYY-MM-DD HH:mm KST' 형식
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} KST", s), s
+
+
+def test_latest_price_cache_clear_safe():
+    # 가격 새로고침 버튼이 호출하는 표적 캐시 초기화가 예외 없이 동작해야 함
+    m = _dash()
+    m.latest_price.clear()   # st.cache_data 함수의 clear() — bare mode에서도 안전
+
+
 def test_calc_position_qty_formula():
     m = _dash()
     # entry 환산 30, stop 환산 20 → 주당 리스크 10, risk 70 → 수량 7

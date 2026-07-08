@@ -401,6 +401,12 @@ def lev_convert(etf_now, base_now, target):
         return None
 
 
+def kst_now_str() -> str:
+    """한국시간 기준시각 문자열: 'YYYY-MM-DD HH:mm KST'."""
+    kst = dt.timezone(dt.timedelta(hours=9))
+    return dt.datetime.now(kst).strftime("%Y-%m-%d %H:%M KST")
+
+
 def calc_position_qty(entry_lev_price, stop_lev_price, risk_amount):
     """계획 수량 = 진입 리스크 ÷ 주당 리스크(진입 환산가 − 손절 환산가).
     일반 반올림(4.49→4, 4.50→5 — 파이썬 round는 은행가 방식이라 floor(x+0.5) 사용).
@@ -560,6 +566,20 @@ def _render_trade_detail(r: dict, currency: str):
 
 
 def render_trade_tab():
+    # 가격 기준시각 + 새로고침 (latest_price 캐시만 표적 초기화 — 다른 탭 캐시 무영향)
+    if "price_asof" not in st.session_state:
+        st.session_state["price_asof"] = kst_now_str()
+    h1, h2 = st.columns([2.2, 1])
+    h1.markdown(f"**가격 기준:** {st.session_state['price_asof']}")
+    if h2.button("🔄 가격 새로고침", key="tr_price_refresh", use_container_width=True):
+        latest_price.clear()                       # 화면 계산용 가격 캐시 초기화
+        st.session_state["price_asof"] = kst_now_str()
+        st.toast("가격 기준을 새로고침했습니다 — 환산가/수량을 다시 계산합니다")
+        st.rerun()
+    st.caption("본주 현재가는 Supabase DB 최신값(매 거래일 자동 갱신) 기준, 레버리지 ETF는 DB 또는 FDR 조회 기준입니다. "
+               "새로고침 버튼은 화면 계산용 가격 캐시를 초기화해 환산가/수량을 다시 계산하며, "
+               "DB 전체 가격을 새로 수집하지는 않습니다(수집은 일일 파이프라인 담당).")
+
     mg_label = st.radio("시장", ["국장", "미장"], horizontal=True, key="tr_mg")
     market_group = "KR" if mg_label == "국장" else "US"
     currency = "KRW" if market_group == "KR" else "USD"
