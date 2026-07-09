@@ -9,7 +9,8 @@ create table if not exists stocks (
     origin_sector   text,                 -- 기존 산업 섹터
     origin_sub      text,                 -- 기존 세부섹터
     tier            text,                 -- mega/core/growth/theme
-    classification  text not null,        -- swing / sector / hold
+    classification  text not null,        -- swing / sector / hold / global(해외 표시용)
+    high_52w        double precision,     -- 최근 52주 고점(장중 고가 기준, 일일 파이프라인이 캐시)
     avg_6m          bigint,               -- 최근 6개월 일평균 거래대금(원)
     short_avg       bigint,               -- 최근 20일 평균 거래대금(원)
     today_value     bigint,               -- 당일 거래대금(원)
@@ -28,6 +29,7 @@ create table if not exists prices (
     market          text,
     date            date not null,
     close           double precision,
+    high            double precision,     -- 장중 고가(52주 고점 계산용, 구데이터는 NULL 허용)
     volume          double precision,
     value           double precision,     -- 거래대금(원)
     value_estimated boolean default false,

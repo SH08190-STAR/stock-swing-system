@@ -30,6 +30,41 @@ def now_kst_str() -> str:
     return (dt.datetime.utcnow() + dt.timedelta(hours=9)).strftime("%Y-%m-%d %H:%M")
 
 
+def calc_52w_high(ohlcv, end=None):
+    """최근 365일 기준 52주 고점(장중 고가 max). 표시 캐시용 — 분류와 무관.
+    - high 결측 행은 close 로 대체(구데이터 백필 전 과도기 안전)
+    - 0/음수 제외, 52주 미만 데이터(신규상장)는 보유 기간 내 고점
+    - 계산 불가/실패 시 None (개별 실패가 파이프라인을 멈추지 않게)"""
+    try:
+        if ohlcv is None or len(ohlcv) == 0:
+            return None
+        if end is None:
+            end = dt.date.today()
+        cutoff = end - dt.timedelta(days=365)
+        idx = [ix.date() if hasattr(ix, "date") else ix for ix in ohlcv.index]
+        mask = [d >= cutoff for d in idx]
+        d = ohlcv[mask]
+        if len(d) == 0:
+            return None
+        highs = d["high"] if "high" in d.columns else None
+        closes = d["close"] if "close" in d.columns else None
+        if highs is not None:
+            highs = highs.where(highs > 0)   # 0/음수 고가는 결측 취급 → close 대체
+        if highs is not None and closes is not None:
+            s = highs.fillna(closes)
+        elif highs is not None:
+            s = highs
+        elif closes is not None:
+            s = closes
+        else:
+            return None
+        s = s.dropna()
+        s = s[s > 0]
+        return float(s.max()) if len(s) else None
+    except Exception:
+        return None
+
+
 def save_foreign(end, updated_at, last_ok=""):
     """
     해외 종목(표시용) 수집 후 기존 DB 구조에 저장.
@@ -58,6 +93,7 @@ def save_foreign(end, updated_at, last_ok=""):
             "origin_sector": r.get("origin_sector", ""),
             "classification": "global",      # 해외 = 표시 전용(분류 미적용)
             "close": close, "change_pct": r.get("change_pct"),
+            "high_52w": calc_52w_high(r.get("ohlcv"), end),   # 52주 고점(실패 시 None)
             "estimated": True,               # FDR 근사 거래대금 포함
             "reason": "해외 표시용(분류 미적용)",
         })
@@ -113,10 +149,11 @@ def main():
     prev_avg = db.get_prev_avg()
     changes = classifier.diff_classifications(prev_class, results)
 
-    # 6~7) 저장
+    # 6~7) 저장 (+ 52주 고점 계산 — 분류 결과에는 영향 없음, 표시 캐시)
     saved_days = 0
     fail_targets = []
     for c, raw in zip(results, collected):
+        c["high_52w"] = calc_52w_high(raw.get("ohlcv"), end)   # 실패 시 None
         try:
             if raw.get("ohlcv") is not None:
                 saved_days += db.save_ohlcv(c["code"], c["market"], raw["ohlcv"])

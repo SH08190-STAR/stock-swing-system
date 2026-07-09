@@ -68,7 +68,8 @@ def merge_universe(wl_rows: pd.DataFrame, db_stocks: pd.DataFrame) -> pd.DataFra
     keep = [c for c in ["code", "name", "country", "market", "origin_sector"] if c in base.columns]
     base = base[keep].copy()
     val_cols = ["code", "classification", "avg_6m", "short_avg", "today_value",
-                "close", "change_pct", "used_days", "estimated", "data_date", "reason"]
+                "close", "change_pct", "used_days", "estimated", "data_date", "reason",
+                "high_52w"]
     if db_stocks is not None and not db_stocks.empty:
         sel = db_stocks[[c for c in val_cols if c in db_stocks.columns]]
         merged = base.merge(sel, on="code", how="left")
@@ -125,6 +126,36 @@ def format_price(value, currency: str) -> str:
     if currency == "KRW":
         return f"{float(value):,.0f}원"
     return f"${float(value):,.2f}"
+
+
+def calc_gap_from_high(current_price, high_52w):
+    """고점 대비 이격률 = (현재가 − 52주 고점) / 고점 × 100 (보통 음수).
+    현재가/고점이 없거나 0 이하이면 None."""
+    try:
+        for v in (current_price, high_52w):
+            if v is None or pd.isna(v) or float(v) <= 0:
+                return None
+        return (float(current_price) - float(high_52w)) / float(high_52w) * 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def format_52w_high_line(row) -> str:
+    """카드용 한 줄: '52주 고점 91,000원 · 고점 대비 -12.5%'.
+    고점 없으면 '52주 고점 —', 이격률 계산 불가면 가격만 표시(예외 없음)."""
+    currency = get_currency(row)
+    h = row.get("high_52w")
+    try:
+        has_high = h is not None and not pd.isna(h) and float(h) > 0
+    except (TypeError, ValueError):
+        has_high = False
+    if not has_high:
+        return "52주 고점 —"
+    line = f"52주 고점 {format_price(h, currency)}"
+    gap = calc_gap_from_high(row.get("close"), h)
+    if gap is not None:
+        line += f" · 고점 대비 {gap:+.1f}%"
+    return line
 
 
 def current_sector(row) -> str:
@@ -290,6 +321,8 @@ def render_stock_card(row: dict, keyns: str = "map"):
         else:
             left.metric("현재가", "—")
             left.caption("💱 해외 현재가 연동 전" if not is_kr else "가격 데이터 없음")
+        # 52주 고점 + 고점 대비 이격률 (중립 회색 캡션 — 관심가 색상과 분리)
+        left.caption(format_52w_high_line(row))
 
         # 관심가 입력 — 저장값이 있으면 기본값으로 prefill(세션 시드). 종목별 고유 key.
         # DB의 target_price는 통화 무관 numeric 그대로(해석은 country/market 기준).

@@ -45,6 +45,7 @@ def save_ohlcv(code: str, market: str, df) -> int:
             "market": market,
             "date": d.isoformat(),
             "close": _num(r.get("close")),
+            "high": _num(r.get("high")),          # 장중 고가(없거나 NaN이면 None)
             "volume": _num(r.get("volume")),
             "value": _num(val),
             "value_estimated": bool(r.get("value_estimated", False)),
@@ -77,7 +78,7 @@ def save_classification(rows: list[dict], data_date: str, updated_at: str):
         }
         # 수치는 값이 있을 때만 기록(보류 시 이전값 보존)
         for k in ("avg_6m", "today_value", "short_avg", "close",
-                  "change_pct", "used_days"):
+                  "change_pct", "used_days", "high_52w"):
             if c.get(k) is not None:
                 payload[k] = c[k]
         client().table("stocks").upsert(payload, on_conflict="code").execute()
@@ -259,6 +260,7 @@ def _num(x):
     try:
         if x is None:
             return None
-        return float(x)
+        v = float(x)
+        return None if v != v else v   # NaN → None (JSON 직렬화 안전)
     except Exception:
         return None

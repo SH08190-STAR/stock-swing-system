@@ -24,6 +24,11 @@ from dateutil.relativedelta import relativedelta
 
 from app import config
 
+# 가격 수집 기간(개월). 52주 고점 계산을 위해 12개월 수집.
+# 분류 기준은 config.LOOKBACK_MONTHS(6개월) 그대로 — classifier._avg_6m_value 가
+# 입력 df 길이와 무관하게 내부에서 6개월로 잘라 계산하므로 분류 결과는 불변이다.
+FETCH_MONTHS = 12
+
 # pykrx / FDR 는 import 시점에 무거우므로 함수 안에서 지연 로딩
 def _import_pykrx():
     from pykrx import stock
@@ -90,9 +95,9 @@ def _fetch_pykrx(code: str, start: dt.date, end: dt.date):
     if df is None or len(df) == 0:
         return None
     # pykrx 컬럼: 시가 고가 저가 종가 거래량 거래대금 등락률
-    rename = {"종가": "close", "거래량": "volume", "거래대금": "value"}
+    rename = {"종가": "close", "고가": "high", "거래량": "volume", "거래대금": "value"}
     df = df.rename(columns=rename)
-    keep = [c for c in ["close", "volume", "value"] if c in df.columns]
+    keep = [c for c in ["close", "high", "volume", "value"] if c in df.columns]
     df = df[keep].copy()
     # 거래정지 등으로 거래대금 0/결측인 날은 평균 계산에서 제외하도록 표시
     return df
@@ -125,7 +130,7 @@ def _fetch_datagokr(code: str, start: dt.date, end: dt.date):
            "GetStockSecuritiesInfoService/getStockPriceInfo")
     params = {
         "serviceKey": config.DATA_GO_KR_KEY,   # Decoding(일반) 인증키
-        "numOfRows": 400,                       # 6개월 거래일(~125) 여유
+        "numOfRows": 500,                       # 12개월 거래일(~250) 여유
         "pageNo": 1,
         "resultType": "json",
         "beginBasDt": start.strftime("%Y%m%d"),
@@ -156,6 +161,7 @@ def _fetch_datagokr(code: str, start: dt.date, end: dt.date):
         recs.append({
             "date": d,
             "close": _to_float(it.get("clpr")),
+            "high": _to_float(it.get("hipr")),     # 장중 고가(없으면 None — 안전)
             "volume": _to_float(it.get("trqu")),
             "value": _to_float(it.get("trPrc")),   # 실제 거래대금(추정 아님)
         })
@@ -176,8 +182,9 @@ def _fetch_fdr(code: str, start: dt.date, end: dt.date):
     df = fdr.DataReader(code, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
     if df is None or len(df) == 0:
         return None
-    out = df.rename(columns={"Close": "close", "Volume": "volume"})
-    out = out[["close", "volume"]].copy()
+    out = df.rename(columns={"Close": "close", "High": "high", "Volume": "volume"})
+    keep = [c for c in ["close", "high", "volume"] if c in out.columns]
+    out = out[keep].copy()
     if "Amount" in df.columns:      # 일부 버전은 거래대금 제공
         out["value"] = df["Amount"]
         out["value_estimated"] = False
@@ -190,10 +197,11 @@ def _fetch_fdr(code: str, start: dt.date, end: dt.date):
 def fetch_stock(code: str, name: str, market: str,
                 end: dt.date) -> dict:
     """
-    한 종목의 최근 6개월 일봉 수집. 주→예비 폴백, 재시도 포함.
+    한 종목의 최근 12개월(FETCH_MONTHS) 일봉 수집. 주→예비 폴백, 재시도 포함.
+    분류는 classifier가 6개월로 잘라 계산하므로 12개월 수집이 분류에 영향 없음.
     실패해도 예외를 던지지 않고 status="hold"로 돌려준다(자동화 중단 방지).
     """
-    start = end - relativedelta(months=config.LOOKBACK_MONTHS)
+    start = end - relativedelta(months=FETCH_MONTHS)
 
     # 거래대금을 실제로 주는 공공 API 키가 있으면 최우선. 이어서 설정된 주/예비 소스.
     order = []
@@ -257,15 +265,15 @@ def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
 def fetch_foreign(symbol: str, name: str | None = None,
                   market: str | None = None, end: dt.date | None = None) -> dict:
     """
-    해외 티커 1개의 최근 6개월 일봉을 FDR로 수집(표시 전용).
+    해외 티커 1개의 최근 12개월(FETCH_MONTHS) 일봉을 FDR로 수집(표시 전용).
     한국 fetch_stock 과 같은 형태(code/name/market/ohlcv/source/status/reason)에
     현재가 표시용 close/prev_close/change_pct 를 더해 반환한다.
     실패/빈 데이터여도 예외를 던지지 않고 status="hold" 로 안전 반환한다.
-    분류는 적용하지 않으며, 저장 단계에서 classification="global" 로 처리할 예정.
+    분류는 적용하지 않으며, 저장 단계에서 classification="global" 로 처리한다.
     """
     if end is None:
         end = latest_trading_day() or dt.date.today()
-    start = end - relativedelta(months=config.LOOKBACK_MONTHS)
+    start = end - relativedelta(months=FETCH_MONTHS)
 
     base = {
         "code": symbol, "name": name or symbol, "market": market or "",

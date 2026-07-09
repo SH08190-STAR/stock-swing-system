@@ -40,11 +40,11 @@ class _FakeResp:
 
 
 def test_fetch_datagokr_parses_real_value(monkeypatch):
-    # 공공 API가 실제 거래대금(trPrc)을 주는 정상 경로. 파싱·정확코드 필터 검증.
+    # 공공 API가 실제 거래대금(trPrc)·고가(hipr)를 주는 정상 경로. 파싱·정확코드 필터 검증.
     payload = {"response": {"body": {"items": {"item": [
-        {"basDt": "20260618", "srtnCd": "005490", "clpr": "367000",
+        {"basDt": "20260618", "srtnCd": "005490", "clpr": "367000", "hipr": "381000",
          "trqu": "429197", "trPrc": "159000000000"},
-        {"basDt": "20260619", "srtnCd": "005490", "clpr": "356500",
+        {"basDt": "20260619", "srtnCd": "005490", "clpr": "356500", "hipr": "372000",
          "trqu": "535534", "trPrc": "190000000000"},
         # likeSrtnCd 부분일치로 섞일 수 있는 다른 종목 → 제외돼야 함
         {"basDt": "20260619", "srtnCd": "0054901", "clpr": "1", "trqu": "1", "trPrc": "1"},
@@ -52,10 +52,101 @@ def test_fetch_datagokr_parses_real_value(monkeypatch):
     monkeypatch.setattr(config, "DATA_GO_KR_KEY", "TEST_KEY")
     monkeypatch.setattr(collector.requests, "get", lambda *a, **k: _FakeResp(payload))
     df = collector._fetch_datagokr("005490", dt.date(2025, 12, 19), dt.date(2026, 6, 19))
-    assert list(df.columns) == ["close", "volume", "value", "value_estimated"]
+    assert list(df.columns) == ["close", "high", "volume", "value", "value_estimated"]
     assert len(df) == 2                       # 다른 종목(0054901) 제외
     assert df["value"].iloc[-1] == 190000000000
+    assert df["high"].iloc[-1] == 372000      # 장중 고가 파싱
     assert df["value_estimated"].any() == False   # 실제 거래대금 — 추정 아님
+
+
+def test_fetch_datagokr_missing_hipr_safe(monkeypatch):
+    # hipr가 없는 응답이어도 close 수집은 유지, high는 None(안전)
+    payload = {"response": {"body": {"items": {"item": [
+        {"basDt": "20260619", "srtnCd": "005490", "clpr": "356500",
+         "trqu": "535534", "trPrc": "190000000000"},
+    ]}}}}
+    monkeypatch.setattr(config, "DATA_GO_KR_KEY", "TEST_KEY")
+    monkeypatch.setattr(collector.requests, "get", lambda *a, **k: _FakeResp(payload))
+    df = collector._fetch_datagokr("005490", dt.date(2025, 12, 19), dt.date(2026, 6, 19))
+    assert df["close"].iloc[0] == 356500
+    assert pd.isna(df["high"].iloc[0])        # 고가 없음 → NaN, 예외 없음
+
+
+def test_fetch_pykrx_keeps_high(monkeypatch):
+    # pykrx 원본(한국어 컬럼)에서 고가→high 유지
+    class _FakeStock:
+        @staticmethod
+        def get_market_ohlcv(s, e, code):
+            return pd.DataFrame({
+                "시가": [100], "고가": [120], "저가": [90], "종가": [110],
+                "거래량": [1000], "등락률": [1.0],
+            }, index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(collector, "_import_pykrx", lambda: _FakeStock)
+    df = collector._fetch_pykrx("005490", dt.date(2025, 6, 19), dt.date(2026, 6, 19))
+    assert "high" in df.columns and df["high"].iloc[0] == 120
+    assert df["close"].iloc[0] == 110
+
+
+def test_fetch_fdr_keeps_high(monkeypatch):
+    # FDR 원본(High)→high 유지. fetch_foreign이 _fetch_fdr 재사용이라 해외도 자동 반영.
+    class _FakeFdr:
+        @staticmethod
+        def DataReader(code, s, e):
+            return pd.DataFrame({
+                "Open": [100.0], "High": [125.0], "Low": [95.0],
+                "Close": [110.0], "Volume": [500],
+            }, index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(collector, "_import_fdr", lambda: _FakeFdr)
+    df = collector._fetch_fdr("AAPL", dt.date(2025, 6, 19), dt.date(2026, 6, 19))
+    assert "high" in df.columns and df["high"].iloc[0] == 125.0
+    assert df["close"].iloc[0] == 110.0
+    assert df["value_estimated"].iloc[0] == True   # Amount 없음 → 근사
+
+
+def test_fetch_fdr_missing_high_safe(monkeypatch):
+    # High 컬럼이 없어도 close 수집은 깨지지 않음
+    class _FakeFdr:
+        @staticmethod
+        def DataReader(code, s, e):
+            return pd.DataFrame({"Close": [110.0], "Volume": [500]},
+                                index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(collector, "_import_fdr", lambda: _FakeFdr)
+    df = collector._fetch_fdr("AAPL", dt.date(2025, 6, 19), dt.date(2026, 6, 19))
+    assert "high" not in df.columns           # 없으면 생략(안전)
+    assert df["close"].iloc[0] == 110.0
+
+
+def test_fetch_period_is_12_months(monkeypatch):
+    # 수집 시작일이 end-12개월인지(FETCH_MONTHS). 분류용 6개월 상수는 별도 유지.
+    captured = {}
+    def fake_pykrx(code, start, end):
+        captured["start"], captured["end"] = start, end
+        return pd.DataFrame({"close": [1], "volume": [1], "value": [1]},
+                            index=[dt.date(2026, 6, 19)])
+    monkeypatch.setattr(config, "DATA_GO_KR_KEY", "")
+    monkeypatch.setattr(collector, "_fetch_pykrx", fake_pykrx)
+    monkeypatch.setattr(collector.time, "sleep", lambda *_: None)
+    collector.fetch_stock("005490", "POSCO홀딩스", "KOSPI", dt.date(2026, 6, 19))
+    days = (captured["end"] - captured["start"]).days
+    assert 360 <= days <= 370                  # 12개월
+    assert collector.FETCH_MONTHS == 12
+    assert config.LOOKBACK_MONTHS == 6         # 분류 기준 유지
+
+
+def test_classification_unchanged_with_12m_data():
+    # 12개월 df를 넣어도 분류는 최근 6개월만 사용(과거 6개월 폭등값 무시 → swing 유지)
+    from app import classifier as C
+    end = dt.date(2026, 6, 19)
+    idx = pd.bdate_range(end - pd.Timedelta(days=365), end)
+    old = idx[idx < pd.Timestamp(end) - pd.Timedelta(days=185)]
+    recent = idx[idx >= pd.Timestamp(end) - pd.Timedelta(days=185)]
+    # 합성 데이터(로직 검증 전용): 과거엔 5,000억/일, 최근 6개월은 800억/일
+    vals = [5000 * 10**8] * len(old) + [800 * 10**8] * len(recent)
+    df = pd.DataFrame({"close": [10000] * len(idx), "high": [10500] * len(idx),
+                       "volume": [1000] * len(idx), "value": vals}, index=idx)
+    r = C.classify_one({"code": "T", "name": "T", "market": "KOSPI", "ohlcv": df,
+                        "status": "ok", "reason": ""}, end)
+    assert r["classification"] == "swing"      # 과거 폭등값이 섞였다면 sector가 됐을 것
 
 
 def test_datagokr_is_primary_when_key_set(monkeypatch):
