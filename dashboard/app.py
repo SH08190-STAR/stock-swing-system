@@ -445,17 +445,78 @@ def latest_price(symbol: str):
     return None
 
 
+def normalize_symbol(symbol, market_group: str | None = None) -> str:
+    """조회/저장용 심볼 정규화. 기존 DB 데이터는 건드리지 않고 입력·조회 시점에만 적용.
+    - 숫자만이면 한국 코드로 보고 zfill(6): '5930' → '005930'
+    - KR의 비숫자(한글 종목명 등)는 그대로(이름 보조조회용)
+    - 그 외(미국 티커)는 대문자"""
+    s = str(symbol or "").strip()
+    if not s:
+        return s
+    if s.isdigit():
+        return s.zfill(6)
+    if market_group == "KR":
+        return s
+    return s.upper()
+
+
+@st.cache_data(ttl=600)
+def kr_code_by_name(name: str):
+    """한국 종목명 정확일치 → 코드 (stocks 테이블, 유일 일치일 때만). 읽기 전용."""
+    try:
+        res = db.client().table("stocks").select("code").eq("name", str(name).strip()).execute()
+        if res.data and len(res.data) == 1:
+            return res.data[0]["code"]
+    except Exception:
+        pass
+    return None
+
+
+def trade_price(symbol, market_group: str | None = None):
+    """매매 기록용 가격 조회: 정규화 → latest_price(stocks→prices→FDR).
+    KR에서 이름으로 입력된 경우 정확일치 이름→코드 보조조회."""
+    s = normalize_symbol(symbol, market_group)
+    if not s:
+        return None
+    p = latest_price(s)
+    if p is None and market_group == "KR" and not s.isdigit():
+        code = kr_code_by_name(s)
+        if code:
+            p = latest_price(str(code))
+    return p
+
+
 def _fmtp(v, currency):
     return format_price(v, currency) if v is not None else "—"
 
 
+def _plain_target(t):
+    """본주 단독 모드의 '환산가' = 본주 목표가 그대로(유효값만)."""
+    try:
+        if t is None or pd.isna(t) or float(t) <= 0:
+            return None
+        return float(t)
+    except (TypeError, ValueError):
+        return None
+
+
 def _trade_calc(r: dict):
-    """기록 1건의 파생값 계산: 현재가·환산가·주당리스크·수량. 표시 전용."""
-    base_now = latest_price(r.get("symbol"))
-    etf_now = latest_price(r.get("leverage_symbol")) if r.get("leverage_symbol") else None
-    conv = lambda t: lev_convert(etf_now, base_now, t)
+    """기록 1건의 파생값 계산: 현재가·환산가·주당리스크·수량. 표시 전용.
+    레버리지 ETF가 있으면 2배 환산, 없으면 본주 가격 그대로(본주 단독 매매)."""
+    mg = r.get("market_group")
+    base_now = trade_price(r.get("symbol"), mg)
+    lev_sym = str(r.get("leverage_symbol") or "").strip()
+    if lev_sym:
+        etf_now = trade_price(lev_sym, mg)
+        conv = lambda t: lev_convert(etf_now, base_now, t)
+        trade_now = etf_now
+    else:
+        etf_now = None
+        conv = _plain_target          # 본주 단독: 환산가 = 본주 목표가
+        trade_now = base_now
     stop_lev = conv(r.get("stop"))
-    out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev, "conv": conv}
+    out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev,
+           "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym)}
     for i in (1, 2, 3, 4):
         e_lev = conv(r.get(f"entry{i}"))
         out[f"e{i}_lev"] = e_lev
@@ -465,68 +526,71 @@ def _trade_calc(r: dict):
     return out
 
 
-def _summary_table(records: list[dict], status: str, currency: str) -> pd.DataFrame:
-    """짧은 요약표(가로 스크롤 최소화). 상세는 아래 expander에서."""
-    rows = []
-    for r in records:
-        c = _trade_calc(r)
-        d = {
-            "날짜": r.get("record_date"), "티커": r.get("symbol"),
-            "ETF": r.get("leverage_symbol") or "—",
-            "본주 현재가": _fmtp(c["base_now"], currency),
-            "ETF 현재가": _fmtp(c["etf_now"], currency),
-            "손절": _fmtp(r.get("stop"), currency),
-            "손절 환산": _fmtp(c["stop_lev"], currency),
-            "총 계획 리스크": c["total_risk"],
-            "메모": r.get("memo") or "",
-        }
-        if status == "waiting":
-            d.update({"1차 진입": _fmtp(r.get("entry1"), currency),
-                      "1차 환산": _fmtp(c["e1_lev"], currency),
-                      "1차 수량": c["qty1"] if c["qty1"] is not None else "—"})
-        elif status == "entered":
-            nxt = next((i for i in (2, 3, 4) if r.get(f"entry{i}")), None)
-            d.update({
-                "다음 진입": _fmtp(r.get(f"entry{nxt}"), currency) if nxt else "—",
-                "다음 환산": _fmtp(c[f"e{nxt}_lev"], currency) if nxt else "—",
-                "다음 수량": (c[f"qty{nxt}"] if nxt and c[f"qty{nxt}"] is not None else "—"),
-                "1차 익절": _fmtp(r.get("tp1"), currency),
-                "2차 익절": _fmtp(r.get("tp2"), currency),
-            })
-        elif status == "tp_in":
-            d["2차 익절"] = _fmtp(r.get("tp2"), currency)
-        elif status == "completed":
-            d["총 손익"] = r.get("realized_total_pnl")
-        rows.append(d)
-    order = {
-        "waiting": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
-                    "1차 진입", "1차 환산", "1차 수량", "손절", "손절 환산", "총 계획 리스크", "메모"],
-        "entered": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
-                    "다음 진입", "다음 환산", "다음 수량", "1차 익절", "2차 익절",
-                    "손절", "손절 환산", "총 계획 리스크", "메모"],
-        "tp_in": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
-                  "2차 익절", "손절", "손절 환산", "총 계획 리스크", "메모"],
-        "completed": ["날짜", "티커", "ETF", "본주 현재가", "ETF 현재가",
-                      "손절", "손절 환산", "총 계획 리스크", "총 손익", "메모"],
-    }[status]
-    return pd.DataFrame(rows)[order] if rows else pd.DataFrame(columns=order)
+_BADGE_STYLES = {
+    "waiting": ("#E5E7EB", "#374151"), "entered": ("#DBEAFE", "#1D4ED8"),
+    "tp_in": ("#FEF3C7", "#92400E"), "completed": ("#DCFCE7", "#166534"),
+}
+
+
+def _badge(text, bg, fg):
+    return (f"<span style='background:{bg};color:{fg};padding:2px 10px;border-radius:12px;"
+            f"font-size:12px;margin-right:6px;white-space:nowrap;'>{html.escape(str(text))}</span>")
+
+
+def _render_trade_card(r: dict, currency: str):
+    """기록 1건을 카드형으로: 배지(상태/시장/본주·레버리지) + 핵심 수치 + 상세 expander.
+    모바일 가로 스크롤 최소화 목적(표 대신 카드)."""
+    c = _trade_calc(r)
+    status = r.get("status")
+    bg, fg = _BADGE_STYLES.get(status, ("#E5E7EB", "#374151"))
+    lev_sym = str(r.get("leverage_symbol") or "").strip()
+    badges = (
+        _badge(_ST_LABEL.get(status, status), bg, fg)
+        + _badge("국장" if r.get("market_group") == "KR" else "미장", "#F1F5F9", "#475569")
+        + (_badge(f"2× {lev_sym}", "#F5F3FF", "#6D28D9") if lev_sym
+           else _badge("본주", "#F1F5F9", "#475569"))
+    )
+    with st.container(border=True):
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
+            f"<span style='font-size:17px;font-weight:600;'>{html.escape(str(r.get('symbol') or ''))}</span>"
+            f"<span style='color:#9ca3af;font-size:12px;'>{html.escape(str(r.get('record_date') or ''))}</span>"
+            f"<span>{badges}</span></div>",
+            unsafe_allow_html=True)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("본주 현재가", _fmtp(c["base_now"], currency))
+        m2.metric("거래 현재가" + (" · ETF" if c["is_lev"] else " · 본주"),
+                  _fmtp(c["trade_now"], currency))
+        m3.metric("1차 진입", _fmtp(r.get("entry1"), currency))
+        n1, n2, n3 = st.columns(3)
+        n1.metric("1차 수량", c["qty1"] if c["qty1"] is not None else "—")
+        n2.metric("손절", _fmtp(r.get("stop"), currency))
+        n2.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
+        if status == "completed":
+            n3.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
+        else:
+            n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
+        if c["trade_now"] is None:
+            st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 가격 새로고침을 눌러보세요.")
+        if r.get("memo"):
+            st.caption(f"📝 {r['memo']}")
+        _render_trade_detail(r, currency)
 
 
 def _render_trade_detail(r: dict, currency: str):
     """기록 1건 상세 expander: 기본정보 / 진입계획(수량) / 익절·손절 / 완료손익."""
     c = _trade_calc(r)
-    title = f"{r.get('record_date')} {r.get('symbol')} / {r.get('leverage_symbol') or '—'} / {_ST_LABEL.get(r.get('status'), r.get('status'))}"
-    with st.expander(f"📋 {title}"):
+    with st.expander("📋 상세 보기 — 1~4차 계획 · 익절/손절" +
+                     (" · 완료 손익" if r.get("status") == "completed" else "")):
         # 1. 기본 정보
         b1, b2, b3, b4 = st.columns(4)
         b1.metric("본주 현재가", _fmtp(c["base_now"], currency))
-        b2.metric("ETF 현재가", _fmtp(c["etf_now"], currency))
+        b2.metric("거래 현재가" + (" · ETF" if c["is_lev"] else " · 본주"),
+                  _fmtp(c["trade_now"], currency))
         b3.metric("시장", "국장" if r.get("market_group") == "KR" else "미장")
         b4.metric("상태", _ST_LABEL.get(r.get("status"), "—"))
-        if r.get("memo"):
-            st.caption(f"📝 {r['memo']}")
 
-        # 2. 진입 계획 (환산가·주당 리스크·수량)
+        # 2. 진입 계획 (환산가·주당 리스크·수량) — 본주 단독이면 환산가=본주가
         plan = []
         for i in (1, 2, 3, 4):
             e, e_lev, risk, qty = r.get(f"entry{i}"), c[f"e{i}_lev"], r.get(f"risk{i}"), c[f"qty{i}"]
@@ -535,8 +599,8 @@ def _render_trade_detail(r: dict, currency: str):
             per = (e_lev - c["stop_lev"]) if (e_lev is not None and c["stop_lev"] is not None) else None
             plan.append({
                 "구분": f"{i}차", "본주 진입가": _fmtp(e, currency),
-                "ETF 환산가": _fmtp(e_lev, currency),
-                "손절 ETF 환산가": _fmtp(c["stop_lev"], currency),
+                "환산가": _fmtp(e_lev, currency),
+                "손절 환산가": _fmtp(c["stop_lev"], currency),
                 "주당 리스크": _fmtp(per, currency) if per is not None else "—",
                 "입력 리스크": risk if risk is not None else "—",
                 "계산 수량": qty if qty is not None else "—",
@@ -630,8 +694,9 @@ def render_trade_tab():
                 else:
                     rec = {
                         "market_group": market_group, "status": status,
-                        "record_date": f_date.isoformat(), "symbol": f_sym.strip().upper(),
-                        "leverage_symbol": f_lev.strip().upper() or None,
+                        "record_date": f_date.isoformat(),
+                        "symbol": normalize_symbol(f_sym, market_group),   # KR 숫자코드 6자리 보정
+                        "leverage_symbol": normalize_symbol(f_lev, market_group) or None,
                         "entry1": z(f_e1), "entry2": z(f_e2), "entry3": z(f_e3), "entry4": z(f_e4),
                         "tp1": z(f_tp1), "tp2": z(f_tp2), "stop": z(f_stop),
                         "risk1": z(f_r1), "risk2": z(f_r2), "risk3": z(f_r3), "risk4": z(f_r4),
@@ -647,13 +712,13 @@ def render_trade_tab():
                     except Exception as e:
                         st.error(f"저장 실패: {e}")
 
-    # 요약표 + 기록별 상세 펼침
+    # 기록 카드 목록 (모바일 가독성 — 표 대신 카드 + 상세 expander)
     if records:
-        st.dataframe(_summary_table(records, status, currency),
-                     use_container_width=True, hide_index=True)
-        st.caption("환산가 = ETF 현재가 × (1 + 본주 변동률 × 2) · 수량 = 리스크 ÷ (진입환산 − 손절환산), 일반 반올림 · 계획 표시용")
+        st.caption("레버리지 ETF 입력 시: 환산가 = ETF 현재가 × (1 + 본주 변동률 × 2). "
+                   "ETF 미입력(본주 매매) 시: 환산가 = 본주 가격 그대로. "
+                   "수량 = 리스크 ÷ (진입환산 − 손절환산), 일반 반올림 · 계획 표시용")
         for r in records:
-            _render_trade_detail(r, currency)
+            _render_trade_card(r, currency)
     else:
         st.info(f"{mg_label} · {st_label} 기록이 없습니다. 위에서 추가하세요.")
 
@@ -728,8 +793,8 @@ def render_trade_tab():
                         payload = {
                             "id": r["id"],
                             "record_date": g_date.isoformat(),
-                            "symbol": g_sym.strip().upper(),
-                            "leverage_symbol": g_lev.strip().upper() or None,
+                            "symbol": normalize_symbol(g_sym, r.get("market_group")),
+                            "leverage_symbol": normalize_symbol(g_lev, r.get("market_group")) or None,
                             "entry1": z(g_e1), "entry2": z(g_e2), "entry3": z(g_e3), "entry4": z(g_e4),
                             "tp1": z(g_tp1), "tp2": z(g_tp2), "stop": z(g_stop),
                             "risk1": z(g_r1), "risk2": z(g_r2), "risk3": z(g_r3), "risk4": z(g_r4),

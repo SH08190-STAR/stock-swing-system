@@ -32,6 +32,43 @@ def test_lev_convert_formula():
     assert m.lev_convert(100.0, 50.0, 50.0) == 100.0
 
 
+def test_normalize_symbol_kr():
+    m = _dash()
+    assert m.normalize_symbol("5930", "KR") == "005930"      # 앞 0 보정
+    assert m.normalize_symbol("005930", "KR") == "005930"    # 유지
+    assert m.normalize_symbol(" 005930 ", "KR") == "005930"  # 공백 제거
+    assert m.normalize_symbol("삼성전자", "KR") == "삼성전자"  # KR 이름은 그대로(보조조회용)
+    assert m.normalize_symbol("", "KR") == ""
+
+
+def test_normalize_symbol_us():
+    m = _dash()
+    assert m.normalize_symbol("nvda", "US") == "NVDA"
+    assert m.normalize_symbol("NVDA", "US") == "NVDA"
+    assert m.normalize_symbol(" nvdl ", "US") == "NVDL"
+
+
+def test_trade_price_uses_zfilled_code(monkeypatch):
+    """KR '5930' 입력 → latest_price('005930')로 조회되는지."""
+    m = _dash()
+    called = []
+    monkeypatch.setattr(m, "latest_price", lambda s: called.append(s) or 71000.0)
+    assert m.trade_price("5930", "KR") == 71000.0
+    assert called == ["005930"]
+
+
+def test_plain_target_stock_only_mode():
+    """레버리지 ETF 없음: 환산가 = 본주 가격 그대로 + 수량 계산."""
+    m = _dash()
+    assert m._plain_target(190.0) == 190.0
+    assert m._plain_target(None) is None
+    assert m._plain_target(0) is None
+    # 미장 본주: entry 190 / stop 180 / risk 70 → 주당 10 → 수량 7
+    assert m.calc_position_qty(m._plain_target(190), m._plain_target(180), 70) == 7
+    # 국장 본주: entry 80,000 / stop 75,000 / risk 200,000 → 주당 5,000 → 수량 40
+    assert m.calc_position_qty(m._plain_target(80000), m._plain_target(75000), 200000) == 40
+
+
 def test_kst_now_str_format():
     import re
     m = _dash()
