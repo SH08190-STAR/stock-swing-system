@@ -324,57 +324,16 @@ def render_stock_card(row: dict, keyns: str = "map"):
         # 52주 고점 + 고점 대비 이격률 (중립 회색 캡션 — 관심가 색상과 분리)
         left.caption(format_52w_high_line(row))
 
-        # 관심가 입력 — 저장값이 있으면 기본값으로 prefill(세션 시드). 종목별 고유 key.
-        # DB의 target_price는 통화 무관 numeric 그대로(해석은 country/market 기준).
-        tkey = f"{keyns}_t_{code}"
-        saved = st.session_state.get("targets", {}).get(code)
-        if tkey not in st.session_state:
-            st.session_state[tkey] = float(saved) if saved else 0.0
-        cur_target = right.number_input(
-            f"관심가 입력({cur_unit})", min_value=0.0,
-            step=100.0 if currency == "KRW" else 0.5, key=tkey)
-
-        # 이격률 (현재 입력값 기준). 색상: |이격률|≤5 빨강(근접), >5 초록.
-        if has_price and cur_target > 0:
-            gap = (float(close) - float(cur_target)) / float(cur_target) * 100.0
-            near = abs(gap) <= 5
-            color = "#DC2626" if near else "#16A34A"
-            meaning = "관심가 근접" if near else "거리 있음"
-            right.markdown(
-                f"<div style='font-size:12px;color:#6b7280;margin-bottom:-6px;'>이격률 · {meaning}</div>"
-                f"<div style='font-size:22px;font-weight:600;color:{color};'>{gap:+.2f}%</div>",
-                unsafe_allow_html=True,
-            )
-        elif not has_price:
-            right.caption("현재가 연동 후 이격률 계산")
+        # 매매 기록 연동 (관심가 UI 대체 — stock_targets 데이터/함수는 보존, UI만 숨김)
+        # waiting/entered/tp_in 기록을 최대 3줄 표시. completed 제외.
+        link_lines = trade_link_lines(row, currency)
+        if link_lines:
+            right.markdown("<div style='font-size:12px;color:#6b7280;'>📌 매매 기록</div>",
+                           unsafe_allow_html=True)
+            for ln in link_lines:
+                right.caption(ln)
         else:
-            right.caption("관심가 입력 시 이격률 표시")
-
-        # 저장 / 해제 (A안: 버튼 클릭 시에만 DB 반영) + 저장 상태 표시
-        b1, b2, b3 = st.columns([1, 1, 2])
-        if b1.button("💾 저장", key=f"{keyns}_save_{code}", use_container_width=True):
-            try:
-                if cur_target and cur_target > 0:
-                    db.set_target(code, float(cur_target))
-                    st.session_state.setdefault("targets", {})[code] = float(cur_target)
-                    st.toast(f"{name} 관심가 저장 · {format_price(cur_target, currency)}")
-                else:
-                    db.delete_target(code)
-                    st.session_state.setdefault("targets", {}).pop(code, None)
-                    st.toast("관심가가 0이라 해제 처리했어요. 값을 입력 후 저장하세요.")
-            except Exception as e:
-                st.error(f"저장 실패: {e}")
-        if b2.button("✖ 해제", key=f"{keyns}_clear_{code}", use_container_width=True):
-            try:
-                db.delete_target(code)
-                st.session_state.setdefault("targets", {}).pop(code, None)
-                st.session_state[tkey] = 0.0
-                st.toast(f"{name} 관심가 해제됨")
-                st.rerun()
-            except Exception as e:
-                st.error(f"해제 실패: {e}")
-        saved_after = st.session_state.get("targets", {}).get(code)
-        b3.caption(f"💾 DB 저장값 {format_price(saved_after, currency)}" if saved_after else "미저장")
+            right.caption("연동된 매매 기록 없음")
 
         # 일봉 차트 (펼친 뒤 체크 시에만 조회 → 화면 가벼움)
         with st.expander("📈 최근 6개월 일봉 차트"):
@@ -523,6 +482,108 @@ def _fmtp(v, currency):
     return format_price(v, currency) if v is not None else "—"
 
 
+def calc_total_pnl(tp1, tp2, tp3, stop_loss):
+    """완료 총 손익 = 1차+2차+3차 익절 금액 − abs(손절액).
+    None/NaN은 0으로. 손절액은 음수로 입력돼도 abs 처리(이중 음수 방지)."""
+    def n(v):
+        try:
+            if v is None or pd.isna(v):
+                return 0.0
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+    return n(tp1) + n(tp2) + n(tp3) - abs(n(stop_loss))
+
+
+def trade_display_price(r: dict):
+    """섹터 카드 연동용 (라벨, 표시가격). 표시가격 없으면 (라벨, None) 또는 (None, None).
+    waiting/entered: entry1→2→3→4 첫 값. tp_in: 미실현 tp1→tp2→stop 순."""
+    def first_entry():
+        for i in (1, 2, 3, 4):
+            v = r.get(f"entry{i}")
+            if v:
+                return float(v)
+        return None
+    status = r.get("status")
+    if status == "waiting":
+        return ("대기중", first_entry())
+    if status == "entered":
+        return ("진입", first_entry())
+    if status == "tp_in":
+        if not r.get("realized_tp1_profit") and r.get("tp1"):
+            return ("TP IN 다음 목표", float(r["tp1"]))
+        if not r.get("realized_tp2_profit") and r.get("tp2"):
+            return ("TP IN 다음 목표", float(r["tp2"]))
+        if r.get("stop"):
+            return ("TP IN 손절가", float(r["stop"]))
+        return ("TP IN", None)
+    return (None, None)
+
+
+def gap_vs_current(target, current):
+    """(표시가격 − 현재가) / 현재가 × 100. 값 없거나 0 이하이면 None."""
+    try:
+        for v in (target, current):
+            if v is None or pd.isna(v) or float(v) <= 0:
+                return None
+        return (float(target) - float(current)) / float(current) * 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+_TRADE_PRI = {"entered": 0, "tp_in": 1, "waiting": 2}
+
+
+@st.cache_data(ttl=600)
+def load_active_trades() -> dict:
+    """진행중(waiting/entered/tp_in) 매매 기록을 1회 로드해 정규화 심볼→기록목록 매핑.
+    섹터 카드 연동용(캐시 — N+1 쿼리 방지). 정렬: entered→tp_in→waiting, 상태 내 최신순."""
+    try:
+        recs = db.list_trade_records() or []
+    except Exception:
+        recs = []
+    out: dict[str, list] = {}
+    for r in recs:
+        if r.get("status") not in ("waiting", "entered", "tp_in"):
+            continue
+        sym = normalize_symbol(r.get("symbol"), r.get("market_group"))
+        if r.get("market_group") == "KR" and sym and not sym.isdigit():
+            code = kr_code_by_name(sym)      # 종목명 입력 기록 → 코드 매칭(정확일치)
+            if code:
+                sym = str(code)
+        if sym:
+            out.setdefault(sym, []).append(r)
+    for lst in out.values():
+        lst.sort(key=lambda r: str(r.get("record_date") or ""), reverse=True)
+        lst.sort(key=lambda r: _TRADE_PRI.get(r.get("status"), 9))
+    return out
+
+
+def trade_link_lines(row, currency: str, max_lines: int = 3) -> list[str]:
+    """섹터 카드용 매매기록 연동 줄(최대 3줄 + '외 N건')."""
+    recs = load_active_trades().get(str(row.get("code") or ""), [])
+    lines = []
+    for r in recs[:max_lines]:
+        label, price = trade_display_price(r)
+        if label is None:
+            continue
+        try:
+            d = dt.date.fromisoformat(str(r.get("record_date")))
+            dstr = f"{d.month}/{d.day}"
+        except (ValueError, TypeError):
+            dstr = str(r.get("record_date") or "")
+        seg = f"{label} {dstr} {r.get('symbol')}"
+        if price:
+            seg += f" {format_price(price, currency)}"
+            gap = gap_vs_current(price, row.get("close"))
+            if gap is not None:
+                seg += f" · 현재가 대비 {gap:+.1f}%"
+        lines.append(seg)
+    if len(recs) > max_lines:
+        lines.append(f"외 {len(recs) - max_lines}건")
+    return lines
+
+
 def _plain_target(t):
     """본주 단독 모드의 '환산가' = 본주 목표가 그대로(유효값만)."""
     try:
@@ -652,14 +713,15 @@ def _render_trade_detail(r: dict, currency: str):
         t3.metric("손절", _fmtp(r.get("stop"), currency))
         t3.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
 
-        # 4. 완료 손익 (완료 상태만)
+        # 4. 완료 손익 (완료 상태만 — 총 손익은 저장 시 자동 계산값)
         if r.get("status") == "completed":
-            st.markdown("**완료 손익 (수동 입력값)**")
-            p1, p2, p3, p4 = st.columns(4)
-            p1.metric("1차 익절 수익", r.get("realized_tp1_profit") if r.get("realized_tp1_profit") is not None else "—")
-            p2.metric("2차 익절 수익", r.get("realized_tp2_profit") if r.get("realized_tp2_profit") is not None else "—")
-            p3.metric("손절액", r.get("realized_stop_loss") if r.get("realized_stop_loss") is not None else "—")
-            p4.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
+            st.markdown("**완료 손익**")
+            p1, p2, p3, p4, p5 = st.columns(5)
+            p1.metric("1차 익절 금액", r.get("realized_tp1_profit") if r.get("realized_tp1_profit") is not None else "—")
+            p2.metric("2차 익절 금액", r.get("realized_tp2_profit") if r.get("realized_tp2_profit") is not None else "—")
+            p3.metric("3차 익절 금액", r.get("realized_tp3_profit") if r.get("realized_tp3_profit") is not None else "—")
+            p4.metric("손절액", r.get("realized_stop_loss") if r.get("realized_stop_loss") is not None else "—")
+            p5.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
 
 
 def render_trade_tab():
@@ -713,14 +775,18 @@ def render_trade_tab():
             f_r3 = r3.number_input("3차 리스크", min_value=0.0)
             f_r4 = r4.number_input("4차 리스크", min_value=0.0)
             f_memo = st.text_input("메모", "")
-            if status == "completed":
-                p1, p2, p3, p4 = st.columns(4)
-                f_p1 = p1.number_input("1차 익절 수익", value=0.0)
-                f_p2 = p2.number_input("2차 익절 수익", value=0.0)
-                f_ps = p3.number_input("손절액", value=0.0)
-                f_pt = p4.number_input("총 손익", value=0.0)
-            else:
-                f_p1 = f_p2 = f_ps = f_pt = 0.0
+            f_p1 = f_p2 = f_p3 = f_ps = 0.0
+            if status == "tp_in":
+                p1c, p2c = st.columns(2)
+                f_p1 = p1c.number_input("1차 익절 금액", value=0.0)
+                f_p2 = p2c.number_input("2차 익절 금액", value=0.0)
+            elif status == "completed":
+                p1c, p2c, p3c, p4c = st.columns(4)
+                f_p1 = p1c.number_input("1차 익절 금액", value=0.0)
+                f_p2 = p2c.number_input("2차 익절 금액", value=0.0)
+                f_p3 = p3c.number_input("3차 익절 금액", value=0.0)
+                f_ps = p4c.number_input("손절액 (양수 입력)", value=0.0)
+                st.caption("총 손익은 저장 시 자동 계산: 1차+2차+3차 − |손절액|")
             if st.form_submit_button("💾 저장"):
                 if not f_sym.strip():
                     st.error("티커를 입력하세요.")
@@ -733,9 +799,13 @@ def render_trade_tab():
                         "entry1": z(f_e1), "entry2": z(f_e2), "entry3": z(f_e3), "entry4": z(f_e4),
                         "tp1": z(f_tp1), "tp2": z(f_tp2), "stop": z(f_stop),
                         "risk1": z(f_r1), "risk2": z(f_r2), "risk3": z(f_r3), "risk4": z(f_r4),
-                        "realized_tp1_profit": z(f_p1), "realized_tp2_profit": z(f_p2),
+                        "realized_tp1_profit": f_p1 if f_p1 else None,
+                        "realized_tp2_profit": f_p2 if f_p2 else None,
+                        "realized_tp3_profit": f_p3 if f_p3 else None,
                         "realized_stop_loss": f_ps if f_ps else None,
-                        "realized_total_pnl": f_pt if f_pt else None,
+                        "realized_total_pnl": (calc_total_pnl(f_p1, f_p2, f_p3, f_ps)
+                                               if status == "completed" and any((f_p1, f_p2, f_p3, f_ps))
+                                               else None),
                         "memo": f_memo.strip() or None,
                     }
                     try:
@@ -810,15 +880,20 @@ def render_trade_tab():
                 g_r3 = r3c.number_input("3차 리스크", min_value=0.0, value=_f("risk3"))
                 g_r4 = r4c.number_input("4차 리스크", min_value=0.0, value=_f("risk4"))
                 g_memo = st.text_input("메모", value=r.get("memo") or "")
-                if r.get("status") == "completed":
+                g_p1, g_p2 = _f("realized_tp1_profit"), _f("realized_tp2_profit")
+                g_p3, g_ps = _f("realized_tp3_profit"), _f("realized_stop_loss")
+                if r.get("status") == "tp_in":
+                    p1c, p2c = st.columns(2)
+                    g_p1 = p1c.number_input("1차 익절 금액", value=g_p1)
+                    g_p2 = p2c.number_input("2차 익절 금액", value=g_p2)
+                elif r.get("status") == "completed":
                     p1c, p2c, p3c, p4c = st.columns(4)
-                    g_p1 = p1c.number_input("1차 익절 수익", value=_f("realized_tp1_profit"))
-                    g_p2 = p2c.number_input("2차 익절 수익", value=_f("realized_tp2_profit"))
-                    g_ps = p3c.number_input("손절액", value=_f("realized_stop_loss"))
-                    g_pt = p4c.number_input("총 손익", value=_f("realized_total_pnl"))
-                else:
-                    g_p1, g_p2, g_ps, g_pt = _f("realized_tp1_profit"), _f("realized_tp2_profit"), \
-                        _f("realized_stop_loss"), _f("realized_total_pnl")
+                    g_p1 = p1c.number_input("1차 익절 금액", value=g_p1)
+                    g_p2 = p2c.number_input("2차 익절 금액", value=g_p2)
+                    g_p3 = p3c.number_input("3차 익절 금액", value=g_p3)
+                    g_ps = p4c.number_input("손절액 (양수 입력)", value=g_ps)
+                    st.caption("총 손익은 저장 시 자동 계산: 1차+2차+3차 − |손절액| "
+                               "(손익을 입력하지 않으면 기존 총 손익 유지)")
                 if st.form_submit_button("💾 수정 저장"):
                     if not g_sym.strip():
                         st.error("티커를 입력하세요.")
@@ -833,10 +908,14 @@ def render_trade_tab():
                             "risk1": z(g_r1), "risk2": z(g_r2), "risk3": z(g_r3), "risk4": z(g_r4),
                             "realized_tp1_profit": g_p1 if g_p1 else None,
                             "realized_tp2_profit": g_p2 if g_p2 else None,
+                            "realized_tp3_profit": g_p3 if g_p3 else None,
                             "realized_stop_loss": g_ps if g_ps else None,
-                            "realized_total_pnl": g_pt if g_pt else None,
                             "memo": g_memo.strip() or None,
                         }
+                        # 총 손익: 완료 상태에서 손익을 하나라도 입력한 경우에만 자동 계산해 저장.
+                        # (기존 completed 기록의 total만 있고 세부가 빈 경우 — 미입력 저장 시 기존값 보존)
+                        if r.get("status") == "completed" and any((g_p1, g_p2, g_p3, g_ps)):
+                            payload["realized_total_pnl"] = calc_total_pnl(g_p1, g_p2, g_p3, g_ps)
                         try:
                             db.upsert_trade_record(payload)
                             st.toast(f"{payload['symbol']} 기록 수정됨")
@@ -844,24 +923,38 @@ def render_trade_tab():
                         except Exception as e:
                             st.error(f"수정 실패: {e}")
 
-        if status == "completed":
-            st.caption("완료 손익(1차 MVP: 수동 입력 — 익절 비중 규칙 확정 후 자동화 예정)")
-            q1, q2, q3, q4, q5 = st.columns([1, 1, 1, 1, 0.8])
-            v1 = q1.number_input("1차 익절 수익", value=float(r.get("realized_tp1_profit") or 0.0),
-                                 key=f"tr_p1_{r['id']}")
-            v2 = q2.number_input("2차 익절 수익", value=float(r.get("realized_tp2_profit") or 0.0),
-                                 key=f"tr_p2_{r['id']}")
-            v3 = q3.number_input("손절액", value=float(r.get("realized_stop_loss") or 0.0),
-                                 key=f"tr_p3_{r['id']}")
-            v4 = q4.number_input("총 손익", value=float(r.get("realized_total_pnl") or 0.0),
-                                 key=f"tr_p4_{r['id']}")
-            if q5.button("손익 저장", key=f"tr_psave_{r['id']}"):
+        if status in ("tp_in", "completed"):
+            st.caption("실현 손익 입력 — 총 손익은 자동 계산(1차+2차+3차 − |손절액|), 손절액은 양수 입력 권장")
+            if status == "tp_in":
+                q1, q2 = st.columns(2)
+                v1 = q1.number_input("1차 익절 금액", value=float(r.get("realized_tp1_profit") or 0.0),
+                                     key=f"tr_p1_{r['id']}")
+                v2 = q2.number_input("2차 익절 금액", value=float(r.get("realized_tp2_profit") or 0.0),
+                                     key=f"tr_p2_{r['id']}")
+                v3 = float(r.get("realized_tp3_profit") or 0.0)
+                v4 = float(r.get("realized_stop_loss") or 0.0)
+            else:
+                q1, q2, q3, q4, q5 = st.columns([1, 1, 1, 1, 1])
+                v1 = q1.number_input("1차 익절 금액", value=float(r.get("realized_tp1_profit") or 0.0),
+                                     key=f"tr_p1_{r['id']}")
+                v2 = q2.number_input("2차 익절 금액", value=float(r.get("realized_tp2_profit") or 0.0),
+                                     key=f"tr_p2_{r['id']}")
+                v3 = q3.number_input("3차 익절 금액", value=float(r.get("realized_tp3_profit") or 0.0),
+                                     key=f"tr_p3v_{r['id']}")
+                v4 = q4.number_input("손절액 (양수 입력)", value=float(r.get("realized_stop_loss") or 0.0),
+                                     key=f"tr_p4v_{r['id']}")
+                q5.metric("총 손익(자동)", f"{calc_total_pnl(v1, v2, v3, v4):,.0f}")
+            if st.button("💾 손익 저장", key=f"tr_psave_{r['id']}"):
+                payload = {"id": r["id"],
+                           "realized_tp1_profit": v1 or None,
+                           "realized_tp2_profit": v2 or None}
+                if status == "completed":
+                    payload["realized_tp3_profit"] = v3 or None
+                    payload["realized_stop_loss"] = v4 or None
+                    if any((v1, v2, v3, v4)):
+                        payload["realized_total_pnl"] = calc_total_pnl(v1, v2, v3, v4)
                 try:
-                    db.upsert_trade_record({
-                        "id": r["id"],
-                        "realized_tp1_profit": v1 or None, "realized_tp2_profit": v2 or None,
-                        "realized_stop_loss": v3 or None, "realized_total_pnl": v4 or None,
-                    })
+                    db.upsert_trade_record(payload)
                     st.toast("손익 저장됨")
                     st.rerun()
                 except Exception as e:

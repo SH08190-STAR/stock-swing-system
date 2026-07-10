@@ -32,6 +32,69 @@ def test_lev_convert_formula():
     assert m.lev_convert(100.0, 50.0, 50.0) == 100.0
 
 
+# ── 완료 총손익 자동 계산 ───────────────────────────────────
+def test_calc_total_pnl():
+    m = _dash()
+    assert m.calc_total_pnl(50000, 30000, 20000, 10000) == 90000
+    assert m.calc_total_pnl(50000, None, None, -10000) == 40000   # 음수 손절 → abs
+    assert m.calc_total_pnl(None, None, None, None) == 0
+    assert m.calc_total_pnl(50000, 0, float("nan"), 0) == 50000   # NaN → 0
+
+
+# ── 섹터 카드 연동: 표시가격/라벨 판정 ──────────────────────
+def test_trade_display_price_waiting_entered():
+    m = _dash()
+    assert m.trade_display_price({"status": "waiting", "entry1": 175.0}) == ("대기중", 175.0)
+    assert m.trade_display_price({"status": "waiting", "entry1": None, "entry2": 170.0}) == ("대기중", 170.0)
+    assert m.trade_display_price({"status": "entered", "entry1": 188.2}) == ("진입", 188.2)
+    assert m.trade_display_price({"status": "entered"}) == ("진입", None)
+    assert m.trade_display_price({"status": "completed", "entry1": 1.0}) == (None, None)  # 완료 제외
+
+
+def test_trade_display_price_tp_in():
+    m = _dash()
+    # tp1 미실현 → tp1
+    r = {"status": "tp_in", "tp1": 210.0, "tp2": 230.0, "stop": 180.0}
+    assert m.trade_display_price(r) == ("TP IN 다음 목표", 210.0)
+    # tp1 실현, tp2 미실현 → tp2
+    r["realized_tp1_profit"] = 50000
+    assert m.trade_display_price(r) == ("TP IN 다음 목표", 230.0)
+    # tp1/tp2 실현 → stop
+    r["realized_tp2_profit"] = 30000
+    assert m.trade_display_price(r) == ("TP IN 손절가", 180.0)
+    # 전부 없음 → 가격 None
+    assert m.trade_display_price({"status": "tp_in"}) == ("TP IN", None)
+
+
+def test_gap_vs_current():
+    m = _dash()
+    assert m.gap_vs_current(110, 100) == 10.0
+    assert m.gap_vs_current(90, 100) == -10.0
+    assert m.gap_vs_current(None, 100) is None
+    assert m.gap_vs_current(110, 0) is None
+
+
+# ── realized_tp3 저장 경로(upsert pass-through) ─────────────
+def test_completed_payload_includes_tp3(monkeypatch):
+    calls = _patch(monkeypatch)
+    db.upsert_trade_record({"id": "c1", "realized_tp1_profit": 50000,
+                            "realized_tp2_profit": 30000, "realized_tp3_profit": 20000,
+                            "realized_stop_loss": 10000, "realized_total_pnl": 90000})
+    body = [c for c in calls if c[0] == "update"][0][2]
+    assert body["realized_tp3_profit"] == 20000
+    assert body["realized_total_pnl"] == 90000
+
+
+def test_tp_in_payload_includes_tp1_tp2(monkeypatch):
+    calls = _patch(monkeypatch)
+    db.upsert_trade_record({"id": "t1", "realized_tp1_profit": 50000,
+                            "realized_tp2_profit": 30000})
+    body = [c for c in calls if c[0] == "update"][0][2]
+    assert body["realized_tp1_profit"] == 50000
+    assert body["realized_tp2_profit"] == 30000
+    assert "realized_total_pnl" not in body     # TP IN은 총손익 미저장
+
+
 def test_normalize_symbol_kr():
     m = _dash()
     assert m.normalize_symbol("5930", "KR") == "005930"      # 앞 0 보정

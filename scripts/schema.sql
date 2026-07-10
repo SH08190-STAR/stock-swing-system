@@ -93,10 +93,11 @@ create table if not exists trade_records (
     tp1 numeric, tp2 numeric,
     stop numeric,
     risk1 numeric, risk2 numeric, risk3 numeric, risk4 numeric,
-    realized_tp1_profit numeric,         -- 1차 익절 수익(수동)
-    realized_tp2_profit numeric,         -- 2차 익절 수익(수동)
-    realized_stop_loss  numeric,         -- 손절액(수동)
-    realized_total_pnl  numeric,         -- 총 손익(수동)
+    realized_tp1_profit numeric,         -- 1차 익절 금액(실현 손익)
+    realized_tp2_profit numeric,         -- 2차 익절 금액(실현 손익)
+    realized_tp3_profit numeric,         -- 3차 익절 금액(실현 손익)
+    realized_stop_loss  numeric,         -- 손절액(양수 입력 권장, 계산 시 abs 처리)
+    realized_total_pnl  numeric,         -- 총 손익(완료 저장 시 tp1+tp2+tp3-abs(손절) 자동 계산)
     memo text,
     created_at timestamptz default now(),
     updated_at timestamptz default now()
