@@ -9,9 +9,10 @@ from app import watchlist as W
 def test_counts():
     kr = W.all_korean_stocks()
     g = W.all_global_stocks()
-    assert len(kr) == 89, f"한국 종목 89 기대, 실제 {len(kr)}"
-    # 해외 79 + M7 8 = 87
-    assert len(g) == 87, f"해외+M7 87 기대, 실제 {len(g)}"
+    # 2026-07 대표 지시로 TradingView 관심목록 12종목 추가(한국 7, 미국 5)
+    assert len(kr) == 96, f"한국 종목 96 기대, 실제 {len(kr)}"
+    # 해외 84 + M7 8 = 92
+    assert len(g) == 92, f"해외+M7 92 기대, 실제 {len(g)}"
 
 
 def test_no_duplicate_symbols():
