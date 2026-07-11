@@ -148,3 +148,25 @@ def test_trade_matches_query_fields():
     kr = {"symbol": "440110", "market_group": "KR", "memo": None}
     assert m.trade_matches_query(kr, "파두", {"440110": "파두"})   # 종목명(name map)
     assert m.trade_matches_query(kr, "5930", {"440110": "파두"}) is False  # zfill 미스매치 안전
+
+
+# ── 손익 표시색 (폴리시 — 수익 빨강/손실 파랑/0 중립, 비숫자 None) ──
+def test_pnl_color():
+    m = _dash()
+    assert m.pnl_color(1500) == "#f04452"        # 수익 → 빨강
+    assert m.pnl_color(-300) == "#3182f6"        # 손실 → 파랑
+    assert m.pnl_color(0) == "#333d4b"           # 0 → 중립
+    assert m.pnl_color(None) is None             # 값 없음 → 색 미적용
+    assert m.pnl_color("abc") is None            # 비숫자 → 색 미적용
+    assert m.pnl_color(float("nan")) is None     # NaN → 색 미적용
+
+
+# ── 내비게이션 헬퍼 (UI 1단계 — pills/radio 폴백) ─────────────
+def test_select_pills_empty_and_default():
+    m = _dash()
+    # 빈 옵션 → None (예외 없음)
+    assert m.select_pills("메뉴A", [], key=None) is None
+    # 위젯 컨텍스트 없는 bare 모드에서는 기본 선택값이 그대로 반환된다
+    assert m.select_pills("메뉴B", ["a", "b"], default_idx=1, key=None) == "b"
+    # default_idx 범위 밖 → 0으로 보정 (예외 없음)
+    assert m.select_pills("메뉴C", ["a", "b"], default_idx=9, key=None) == "a"
