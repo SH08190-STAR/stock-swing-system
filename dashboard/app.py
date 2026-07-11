@@ -351,6 +351,80 @@ def render_stock_card(row: dict, keyns: str = "map"):
                     st.caption(f"최근 {len(pr)}거래일 종가 · DB prices 기준")
 
 
+# ── 통합/로컬 검색 헬퍼 (read-only 로컬 필터링 — DB 반복 호출 없음) ──
+def normalize_search_query(query) -> str:
+    return str(query or "").strip().lower()
+
+
+def stock_match_rank(row, query):
+    """종목 매칭 순위: 0=코드 완전일치(zfill 대응) 1=이름 완전일치 2=앞부분 3=포함. 불일치 None."""
+    q = normalize_search_query(query).replace(" ", "")
+    if not q:
+        return None
+    code = str(row.get("code") or "").strip().lower()
+    name = str(row.get("name") or "").replace(" ", "").lower()
+    if not code and not name:
+        return None
+    qz = q.zfill(6) if q.isdigit() and len(q) < 6 else q   # 5930 → 005930
+    if q == code or qz == code:
+        return 0
+    if q == name:
+        return 1
+    if (qz and code.startswith(qz)) or (name and name.startswith(q)):
+        return 2
+    if (qz and qz in code) or (q and q in name):
+        return 3
+    return None
+
+
+def filter_stocks_by_query(df, query):
+    """DataFrame 로컬 필터. 빈 검색어면 원본 그대로."""
+    q = normalize_search_query(query)
+    if not q or df is None or len(df) == 0:
+        return df
+    mask = df.apply(lambda r: stock_match_rank(r, q) is not None, axis=1)
+    return df[mask]
+
+
+def trade_matches_query(r: dict, query, name_map: dict | None = None) -> bool:
+    """매매기록 매칭: symbol/종목명/leverage_symbol/memo/status/record_date. 빈 검색어=True."""
+    q = normalize_search_query(query)
+    if not q:
+        return True
+    qz = q.zfill(6) if q.isdigit() and len(q) < 6 else None
+    fields = [r.get("symbol"), r.get("leverage_symbol"), r.get("memo"),
+              r.get("status"), _ST_LABEL.get(r.get("status"), ""),
+              str(r.get("record_date") or "")]
+    if name_map:
+        sym = normalize_symbol(r.get("symbol"), r.get("market_group"))
+        fields.append(name_map.get(str(sym)))
+    for f in fields:
+        s = str(f or "").strip().lower()
+        if not s:
+            continue
+        if q in s or (qz and qz in s):
+            return True
+    return False
+
+
+@st.cache_data(ttl=600)
+def load_all_trades() -> list:
+    """전 상태(완료 포함) 매매기록 1회 로드(통합 검색용, 캐시)."""
+    try:
+        return db.list_trade_records() or []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=600)
+def stock_name_map() -> dict:
+    """symbol→종목명 매핑(워치리스트 기반, 매매기록 종목명 검색용)."""
+    try:
+        return {str(r["symbol"]): str(r.get("name") or "") for r in wl.load_all()}
+    except Exception:
+        return {}
+
+
 # ── 매매 기록 (trade_records) ────────────────────────────────
 TRADE_SQL = """create table if not exists trade_records (
     id             uuid primary key default gen_random_uuid(),
@@ -559,26 +633,47 @@ def load_active_trades() -> dict:
     return out
 
 
+def format_trade_line(r: dict, currency: str, current_price=None):
+    """매매기록 1건 → 카드 연동 한 줄. 종목코드는 카드 헤더에 있으므로 반복하지 않는다.
+    예) 진입 7/6 · 12,300원 · 현재가 대비 +4.0%
+        대기중 7/21 · 진입 예정 10,500원 · 현재가 대비 -11.2%
+        TP IN 7/9 · 다음 목표 15,000원 · 현재가 대비 +8.5%
+    가격이 없으면 '진입가 —'/'진입 예정 —'/'목표가 —' — symbol을 가격 대신 쓰지 않는다."""
+    label, price = trade_display_price(r)
+    if label is None:
+        return None
+    try:
+        d = dt.date.fromisoformat(str(r.get("record_date")))
+        dstr = f"{d.month}/{d.day}"
+    except (ValueError, TypeError):
+        dstr = ""                     # 날짜 이상해도 앱은 유지(날짜만 생략)
+    if label == "진입":
+        prefix, ptxt = "진입", (format_price(price, currency) if price else "진입가 —")
+    elif label == "대기중":
+        prefix, ptxt = "대기중", (f"진입 예정 {format_price(price, currency)}" if price else "진입 예정 —")
+    elif label == "TP IN 다음 목표":
+        prefix, ptxt = "TP IN", f"다음 목표 {format_price(price, currency)}"
+    elif label == "TP IN 손절가":
+        prefix, ptxt = "TP IN", f"손절가 {format_price(price, currency)}"
+    elif label == "TP IN":
+        prefix, ptxt = "TP IN", "목표가 —"
+    else:
+        return None
+    parts = [f"{prefix} {dstr}".strip(), ptxt]
+    gap = gap_vs_current(price, current_price)
+    if gap is not None:
+        parts.append(f"현재가 대비 {gap:+.1f}%")
+    return " · ".join(parts)
+
+
 def trade_link_lines(row, currency: str, max_lines: int = 3) -> list[str]:
     """섹터 카드용 매매기록 연동 줄(최대 3줄 + '외 N건')."""
     recs = load_active_trades().get(str(row.get("code") or ""), [])
     lines = []
     for r in recs[:max_lines]:
-        label, price = trade_display_price(r)
-        if label is None:
-            continue
-        try:
-            d = dt.date.fromisoformat(str(r.get("record_date")))
-            dstr = f"{d.month}/{d.day}"
-        except (ValueError, TypeError):
-            dstr = str(r.get("record_date") or "")
-        seg = f"{label} {dstr} {r.get('symbol')}"
-        if price:
-            seg += f" {format_price(price, currency)}"
-            gap = gap_vs_current(price, row.get("close"))
-            if gap is not None:
-                seg += f" · 현재가 대비 {gap:+.1f}%"
-        lines.append(seg)
+        line = format_trade_line(r, currency, row.get("close"))
+        if line:
+            lines.append(line)
     if len(recs) > max_lines:
         lines.append(f"외 {len(recs) - max_lines}건")
     return lines
@@ -815,6 +910,15 @@ def render_trade_tab():
                     except Exception as e:
                         st.error(f"저장 실패: {e}")
 
+    # 매매기록 검색 — 현재 국장/미장·상태 필터 결과 내 로컬 필터링(read-only).
+    # record id 기반 관리(수정/삭제/상태변경)는 필터된 목록에서도 id가 그대로라 안전.
+    tq = st.text_input("매매기록 검색", key="tr_q",
+                       placeholder="티커·종목명·ETF·메모·날짜")
+    tr_searched = bool(normalize_search_query(tq))
+    if records and tr_searched:
+        _nm = stock_name_map()
+        records = [x for x in records if trade_matches_query(x, tq, _nm)]
+
     # 기록 카드 목록 (모바일 가독성 — 표 대신 카드 + 상세 expander)
     if records:
         st.caption("레버리지 ETF 입력 시: 환산가 = ETF 현재가 × (1 + 본주 변동률 × 2). "
@@ -823,7 +927,8 @@ def render_trade_tab():
         for r in records:
             _render_trade_card(r, currency)
     else:
-        st.info(f"{mg_label} · {st_label} 기록이 없습니다. 위에서 추가하세요.")
+        st.info("현재 조건에서 일치하는 매매기록이 없습니다." if tr_searched
+                else f"{mg_label} · {st_label} 기록이 없습니다. 위에서 추가하세요.")
 
     # 기록 관리(상태 변경 / 삭제 / 완료 손익 수동 입력)
     if records:
@@ -989,6 +1094,39 @@ def main():
         st.info("아직 데이터가 없습니다. update.py가 한 번 실행되면 채워집니다.")
         return
 
+    # 통합 검색 — 전체 종목(188) + 전 상태 매매기록. read-only 로컬 필터링.
+    gq = st.text_input("🔎 전체 종목·매매기록 검색", key="global_q",
+                       placeholder="예: NVDA · 파두 · 5930 · 메모 키워드")
+    if normalize_search_query(gq):
+        ranks = stocks.apply(lambda r: stock_match_rank(r, gq), axis=1)
+        hits = stocks[ranks.notna()].copy()
+        if len(hits):
+            hits["__rank"] = ranks[ranks.notna()]
+            hits = hits.sort_values("__rank")
+        tmap = stock_name_map()
+        t_hits = [t for t in load_all_trades() if trade_matches_query(t, gq, tmap)]
+        t_hits.sort(key=lambda r: str(r.get("record_date") or ""), reverse=True)
+        st.markdown(f"**검색 결과 — 종목 {len(hits)}개 · 매매기록 {len(t_hits)}개**")
+        if len(hits):
+            sdf = pd.DataFrame([{
+                "종목명": h.get("name"), "코드": h.get("code"), "시장": h.get("market"),
+                "현재가": format_price(h.get("close"), get_currency(h)) if h.get("close") is not None and not pd.isna(h.get("close")) else "—",
+                "현재섹터": current_sector(h),
+            } for h in hits.to_dict("records")])
+            st.dataframe(sdf, use_container_width=True, hide_index=True)
+        if t_hits:
+            tdf = pd.DataFrame([{
+                "날짜": t.get("record_date"),
+                "상태": _ST_LABEL.get(t.get("status"), t.get("status")),
+                "시장": "국장" if t.get("market_group") == "KR" else "미장",
+                "티커": t.get("symbol"), "ETF": t.get("leverage_symbol") or "—",
+                "메모": t.get("memo") or "",
+            } for t in t_hits])
+            st.dataframe(tdf, use_container_width=True, hide_index=True)
+        if not len(hits) and not t_hits:
+            st.info("일치하는 종목·매매기록이 없습니다.")
+        st.divider()
+
     # 공통 필터 사이드바
     st.sidebar.header("필터")
     q = st.sidebar.text_input("종목명·코드 검색")
@@ -1072,19 +1210,28 @@ def main():
         default_idx = menu.index("단기스윙") if "단기스윙" in menu else 0
         choice = st.radio("섹터 메뉴", menu, horizontal=True,
                           index=default_idx, key="sector_menu")
+        # 메뉴 범위 내 로컬 검색 (read-only)
+        local_q = st.text_input("이 메뉴에서 종목 검색", key="sector_q",
+                                placeholder="이름·코드 (예: 파두, 5930)")
+        sec_searched = bool(normalize_search_query(local_q))
 
         if choice == "전체":
             sub = base
-            title = f"📂 전체 — {len(sub)}종목"
         else:
             sub = base[base["__cat"] == choice]
+        if sec_searched:
+            sub = filter_stocks_by_query(sub, local_q)
+        if choice == "전체":
+            title = f"📂 전체 — {len(sub)}종목"
+        else:
             label = "🔹 단기스윙 (1,000억 이하 · 섹터 통합)" if choice == "단기스윙" else f"🗂 {choice}"
             title = f"{label} — {len(sub)}종목"
         st.subheader(title)
         st.divider()
 
         if sub.empty:
-            st.info("해당 메뉴에 표시할 종목이 없습니다. (사이드바 필터를 확인하세요)")
+            st.info("이 메뉴에서 일치하는 종목이 없습니다." if sec_searched
+                    else "해당 메뉴에 표시할 종목이 없습니다. (사이드바 필터를 확인하세요)")
         else:
             if len(sub) > 60:
                 st.caption(f"종목이 많아({len(sub)}개) 로딩이 다소 걸릴 수 있어요. 메뉴로 좁혀 보세요.")

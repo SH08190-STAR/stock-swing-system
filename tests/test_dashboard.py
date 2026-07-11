@@ -62,3 +62,89 @@ def test_format_52w_line_high_only_no_gap():
     # 현재가 없으면 이격률 생략, 고점 가격만 표시(예외 없음)
     row = {"close": None, "high_52w": 200, "country": "US", "market": "NASDAQ"}
     assert m.format_52w_high_line(row) == "52주 고점 $200.00"
+
+
+# ── 매매기록 연동 줄 (진입가 표시 버그 회귀) ────────────────
+def test_trade_line_kr_entered_price_not_symbol():
+    m = _dash()
+    r = {"status": "entered", "symbol": "320000", "market_group": "KR",
+         "entry1": 12500, "record_date": "2026-07-06"}
+    line = m.format_trade_line(r, "KRW", 11830)
+    assert line.startswith("진입 7/6")
+    assert "12,500원" in line                 # 실제 진입가
+    assert "320000" not in line               # 종목코드가 가격 자리에 나오면 안 됨
+    assert "현재가 대비 +5.7%" in line
+
+
+def test_trade_line_us_entered():
+    m = _dash()
+    r = {"status": "entered", "symbol": "NVDA", "entry1": 190, "record_date": "2026-07-09"}
+    line = m.format_trade_line(r, "USD", 200.0)
+    assert "$190.00" in line and "현재가 대비 -5.0%" in line
+
+
+def test_trade_line_entry_fallbacks():
+    m = _dash()
+    # entry1 없음 → entry2
+    r = {"status": "entered", "symbol": "005490", "entry2": 300000, "record_date": "2026-07-01"}
+    assert "300,000원" in m.format_trade_line(r, "KRW", None)
+    # 전부 없음 → '진입가 —', symbol을 가격 대신 쓰지 않음
+    r2 = {"status": "entered", "symbol": "005490", "record_date": "2026-07-01"}
+    line2 = m.format_trade_line(r2, "KRW", 100000)
+    assert "진입가 —" in line2 and "005490" not in line2
+
+
+def test_trade_line_waiting_and_tpin():
+    m = _dash()
+    w = {"status": "waiting", "entry1": 10500, "record_date": "2026-07-21"}
+    lw = m.format_trade_line(w, "KRW", 11830)
+    assert lw.startswith("대기중 7/21") and "진입 예정 10,500원" in lw
+    w2 = {"status": "waiting", "record_date": "2026-07-21"}
+    assert "진입 예정 —" in m.format_trade_line(w2, "KRW", None)
+    t = {"status": "tp_in", "tp1": 15000, "record_date": "2026-07-09"}
+    assert "다음 목표 15,000원" in m.format_trade_line(t, "KRW", 13800)
+    t2 = {"status": "tp_in", "realized_tp1_profit": 1, "stop": 9800, "record_date": "2026-07-09"}
+    assert "손절가 9,800원" in m.format_trade_line(t2, "KRW", None)
+    t3 = {"status": "tp_in", "record_date": "2026-07-09"}
+    assert "목표가 —" in m.format_trade_line(t3, "KRW", None)
+    # 날짜 이상값 → 날짜만 생략, 예외 없음
+    t4 = {"status": "entered", "entry1": 100, "record_date": None}
+    assert m.format_trade_line(t4, "USD", None).startswith("진입 ·") or \
+           m.format_trade_line(t4, "USD", None).startswith("진입")
+
+
+# ── 검색 헬퍼 ───────────────────────────────────────────────
+def test_stock_match_rank_variants():
+    m = _dash()
+    nvda = {"code": "NVDA", "name": "NVIDIA"}
+    assert m.stock_match_rank(nvda, "nvda") == 0            # 대소문자 무시
+    assert m.stock_match_rank(nvda, "NVDA") == 0
+    assert m.stock_match_rank({"code": "440110", "name": "파두"}, "파두") == 1
+    assert m.stock_match_rank({"code": "005930", "name": "삼성전자"}, "5930") == 0   # zfill
+    assert m.stock_match_rank({"code": "028260", "name": "삼성물산"}, "삼성") is not None  # 부분
+    assert m.stock_match_rank(nvda, "파두") is None
+    assert m.stock_match_rank({"code": None, "name": None}, "x") is None   # None 안전
+
+
+def test_filter_stocks_by_query():
+    m = _dash()
+    import pandas as pd
+    df = pd.DataFrame([{"code": "NVDA", "name": "NVIDIA"}, {"code": "440110", "name": "파두"}])
+    assert len(m.filter_stocks_by_query(df, "")) == 2               # 빈 검색어 → 원본
+    assert list(m.filter_stocks_by_query(df, "파두")["code"]) == ["440110"]
+    assert len(m.filter_stocks_by_query(df, "twlo")) == 0           # subset 밖 미포함
+
+
+def test_trade_matches_query_fields():
+    m = _dash()
+    r = {"symbol": "EOSE", "leverage_symbol": "EOSU", "memo": "지열 스윙", "status": "waiting",
+         "record_date": "2026-07-08", "market_group": "US"}
+    assert m.trade_matches_query(r, "eose")                 # symbol
+    assert m.trade_matches_query(r, "EOSU")                 # leverage
+    assert m.trade_matches_query(r, "지열")                  # memo
+    assert m.trade_matches_query(r, "2026-07-08")           # 날짜
+    assert m.trade_matches_query(r, "")                     # 빈 검색어 → True
+    assert not m.trade_matches_query(r, "nvda")
+    kr = {"symbol": "440110", "market_group": "KR", "memo": None}
+    assert m.trade_matches_query(kr, "파두", {"440110": "파두"})   # 종목명(name map)
+    assert m.trade_matches_query(kr, "5930", {"440110": "파두"}) is False  # zfill 미스매치 안전
