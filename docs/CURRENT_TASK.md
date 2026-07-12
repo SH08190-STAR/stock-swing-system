@@ -4,7 +4,7 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+push 대기  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
 ## 목표
 revert로 제거된 ETF 환산 가격 일관성 기능을 최소 변경으로 재구현한다
@@ -56,5 +56,10 @@ UI/UX 구조는 변경하지 않는다.
 - [x] tests/test_quotes.py 23 passed
 - [x] 전체 pytest 141 passed (.tmp/pytest.log)
 - [x] git diff --check 통과
-- [ ] predeploy_check (health 200 + 120초 생존) — 진행 중
-- [ ] 매매기록 화면 실검수 (로컬 Streamlit 완전 재시작)
+- [x] predeploy_check — 기능 검사 전부 PASS (health 200 + 120초 생존 포함,
+      git clean 항목만 커밋 전 실행이라 FAIL — 커밋 0f53b24 후 해소)
+- [x] 매매기록 화면 실검수 (로컬 Streamlit 완전 재시작, 2026-07-13):
+      KR 본주 카드 Supabase 출처·기준일 표시, 미조회 종목 보류 안내,
+      US 레버리지 쌍 없음 → 환산 보류 메시지, 버튼 클릭 시 FDR 한 쌍
+      조회(SNDK/SNXX 동일 기준일 2026-07-10, 환산·수량 검산 일치),
+      새 세션에서 DB 기준 복귀(외부 결과 비저장) 확인, DB write 없음
