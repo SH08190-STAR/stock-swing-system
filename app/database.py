@@ -225,6 +225,35 @@ def list_trade_records(market_group: str | None = None,
         return None
 
 
+def code_by_name(name: str):
+    """한국 종목명 정확일치 → 코드 (stocks 테이블, 유일 일치일 때만). read-only.
+    대시보드 kr_code_by_name과 동일 규칙 — 파이프라인이 이름으로 저장된 본주를
+    코드로 해소해 중복 수집/무의미한 이름 조회를 피하는 데 쓴다."""
+    try:
+        res = client().table("stocks").select("code").eq("name", str(name).strip()).execute()
+        if res.data and len(res.data) == 1:
+            return res.data[0]["code"]
+    except Exception:
+        pass
+    return None
+
+
+_ACTIVE_TRADE_STATUSES = ("waiting", "entered", "tp_in")
+
+
+def get_active_trade_symbols():
+    """활성(waiting/entered/tp_in) 매매기록의 market_group/symbol/leverage_symbol만
+    조회한다(완료 기록 제외 — load_active_trades와 동일한 '활성' 정의). read-only.
+    수집 대상 산출용이며, 실패(테이블 미존재 등) 시 빈 리스트."""
+    try:
+        res = (client().table("trade_records")
+               .select("market_group,symbol,leverage_symbol")
+               .in_("status", list(_ACTIVE_TRADE_STATUSES)).execute())
+        return res.data or []
+    except Exception:
+        return []
+
+
 def upsert_trade_record(rec: dict):
     """id가 있으면 update, 없으면 insert. 반환: record id(신규 insert 시 DB 생성값)."""
     payload = dict(rec)
@@ -254,6 +283,43 @@ def get_latest_price(symbol: str):
     except Exception:
         pass
     return None
+
+
+def get_latest_quote(symbol: str):
+    """본주/ETF 최신 가격 + 기준일: stocks(close, data_date) 우선 → prices(close, date) → None.
+    get_latest_price 와 같은 우선순위에 기준일(as_of)만 더한 read-only 조회."""
+    try:
+        res = (client().table("stocks").select("close,data_date")
+               .eq("code", str(symbol)).execute())
+        if res.data:
+            v = _num(res.data[0].get("close"))
+            if v is not None and v > 0:
+                return {"price": v, "as_of": res.data[0].get("data_date")}
+        res = (client().table("prices").select("close,date").eq("code", str(symbol))
+               .order("date", desc=True).limit(1).execute())
+        if res.data:
+            v = _num(res.data[0].get("close"))
+            if v is not None and v > 0:
+                return {"price": v, "as_of": res.data[0].get("date")}
+    except Exception:
+        pass
+    return None
+
+
+def get_common_close_pair(sym_a: str, sym_b: str, lookback: int = 10):
+    """본주·ETF 두 종목의 prices 에서 최신 공통 거래일 close 쌍 (read-only).
+    반환 (date, close_a, close_b), 공통 거래일이 없거나 조회 실패면 None."""
+    from app.quotes import latest_common_close
+    try:
+        rows_a = (client().table("prices").select("date,close")
+                  .eq("code", str(sym_a)).order("date", desc=True)
+                  .limit(lookback).execute()).data or []
+        rows_b = (client().table("prices").select("date,close")
+                  .eq("code", str(sym_b)).order("date", desc=True)
+                  .limit(lookback).execute()).data or []
+        return latest_common_close(rows_a, rows_b)
+    except Exception:
+        return None
 
 
 def _num(x):

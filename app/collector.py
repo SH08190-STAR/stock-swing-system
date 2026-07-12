@@ -241,6 +241,36 @@ def fetch_stock(code: str, name: str, market: str,
     }
 
 
+# ── 매매기록 심볼 수집 대상 산출 (순수 로직, 네트워크·DB 무의존) ──
+def normalize_pipeline_symbol(symbol, market_group: str | None = None) -> str:
+    """수집용 심볼 정규화 (대시보드 normalize_symbol과 동일 규칙).
+    - 숫자만이면 한국 코드로 보고 zfill(6): '5930' → '005930'
+    - KR의 비숫자(예: 레버리지 ETF 코드 '0193W0')는 그대로
+    - 그 외(미국 티커)는 대문자. 빈 값이면 빈 문자열."""
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    if s.isdigit():
+        return s.zfill(6)
+    if market_group == "KR":
+        return s
+    return s.upper()
+
+
+def build_trade_targets(trade_rows) -> list[tuple]:
+    """활성 매매기록 rows → 수집 대상 (market_group, code) 목록.
+    본주 symbol + 비어있지 않은 leverage_symbol을 정규화해 중복·빈값 제거 후 정렬 반환.
+    stocks 테이블에는 추가하지 않으며, 여기 결과는 prices 수집 대상일 뿐이다."""
+    out = set()
+    for r in (trade_rows or []):
+        mg = r.get("market_group")
+        for key in ("symbol", "leverage_symbol"):
+            code = normalize_pipeline_symbol(r.get(key), mg)
+            if code:
+                out.add((mg, code))
+    return sorted(out)
+
+
 def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
     """
     워치리스트 한국 종목 전체 수집.
@@ -259,6 +289,27 @@ def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
             ok = sum(1 for x in results if x["status"] == "ok")
             print(f"  수집 {i}/{n} (성공 {ok})")
     return results
+
+
+# ── FDR(yfinance 백엔드) end 경계 보정 (미국 수집 전용) ──────
+# FDR/yfinance DataReader의 end는 exclusive(끝날 미포함)다. latest_trading_day를
+# 그대로 end로 넘기면 그 '최신 완료 거래일'이 빠진다(예: end=07-10 → 07-09까지만).
+# KR 수집(_fetch_fdr 직접 사용)은 의미가 다를 수 있어 건드리지 않고, 해외(US) 경로만 보정한다.
+def fdr_end_exclusive(last_inclusive: dt.date) -> dt.date:
+    """last_inclusive(포함하려는 최신 완료 거래일)을 FDR 결과에 담기 위한 exclusive end.
+    yfinance end가 exclusive이므로 다음 calendar day를 돌려준다(금요일→토요일이어도 금요일 포함)."""
+    return last_inclusive + dt.timedelta(days=1)
+
+
+def fetch_fdr_through(code: str, start: dt.date, last_inclusive: dt.date):
+    """US FDR 수집용: last_inclusive 거래일까지 '포함'해 조회하고, 그 이후(미래·장중
+    미완료) 행은 저장 전에 제거한다. end=last_inclusive+1로 호출 → last_inclusive 포함,
+    반환 후 date<=last_inclusive만 남긴다. KR 경로는 이 함수를 쓰지 않는다."""
+    df = _fetch_fdr(code, start, fdr_end_exclusive(last_inclusive))
+    if df is None or len(df) == 0:
+        return df
+    keep = [(ix.date() if hasattr(ix, "date") else ix) <= last_inclusive for ix in df.index]
+    return df[keep]
 
 
 # ── 해외 종목 가격 수집 (표시용, 분류 미적용) ────────────────
@@ -283,7 +334,8 @@ def fetch_foreign(symbol: str, name: str | None = None,
     }
 
     try:
-        df = _fetch_fdr(symbol, start, end)   # FDR OHLCV (close/volume/value[추정])
+        # end(최신 완료 거래일)을 포함하도록 exclusive 경계 보정 + 이후 행 제거.
+        df = fetch_fdr_through(symbol, start, end)   # FDR OHLCV (close/volume/value[추정])
     except Exception as e:
         base["reason"] = f"fdr: {type(e).__name__} {e}"
         return base

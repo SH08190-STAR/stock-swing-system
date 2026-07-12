@@ -33,6 +33,7 @@ import streamlit as st
 
 from app import config
 from app import database as db
+from app import quotes as qt
 from app import watchlist as wl
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
@@ -552,6 +553,116 @@ def trade_price(symbol, market_group: str | None = None):
     return p
 
 
+def _resolve_symbol(symbol, market_group: str | None = None) -> str:
+    """조회용 심볼 확정: 정규화 + KR 종목명이면 정확일치 이름→코드 보조조회."""
+    s = normalize_symbol(symbol, market_group)
+    if s and market_group == "KR" and not s.isdigit():
+        code = kr_code_by_name(s)
+        if code:
+            return str(code)
+    return s
+
+
+# ── 가격 쌍 일관성 (app/quotes.py) ──────────────────────────
+# 렌더 기본값은 Supabase DB(본주·ETF 최신 공통 거래일)만 사용하고,
+# 외부(FDR) 조회는 레코드별 버튼 클릭 시 한 쌍만 수행한다(DB 저장 없음).
+DB_PROVIDER = "Supabase"
+NO_COMMON_DAY_MSG = "동일 기준일의 가격 쌍을 찾을 수 없습니다"
+_EXT_QUOTE_PREFIX = "tr_ext_quote_"
+
+
+@st.cache_data(ttl=600, max_entries=64)
+def db_quote_pair(base_symbol: str, etf_symbol: str):
+    """DB prices의 최신 공통 거래일 close 쌍 → QuotePair. 공통 거래일 없으면 None."""
+    row = db.get_common_close_pair(base_symbol, etf_symbol)
+    if not row:
+        return None
+    d, close_a, close_b = row
+    return qt.make_pair(qt.QuoteSnapshot(base_symbol, close_a, DB_PROVIDER, d),
+                        qt.QuoteSnapshot(etf_symbol, close_b, DB_PROVIDER, d))
+
+
+@st.cache_data(ttl=600, max_entries=64)
+def db_single_quote(symbol: str):
+    """본주 단독 매매용 DB 최신가 스냅샷 (stocks→prices, 렌더 시 FDR 미사용)."""
+    q = db.get_latest_quote(symbol)
+    if q:
+        return qt.QuoteSnapshot(str(symbol), q["price"], DB_PROVIDER, q.get("as_of"))
+    return None
+
+
+@st.cache_data(ttl=300, max_entries=32)
+def fdr_quote_pair(base_symbol: str, etf_symbol: str):
+    """FDR 외부 조회(본주·ETF 한 쌍) — 레코드별 버튼 클릭 시에만 호출."""
+    return qt.fetch_fdr_pair(base_symbol, etf_symbol)
+
+
+@st.cache_data(ttl=300, max_entries=32)
+def fdr_single_quote(symbol: str):
+    """FDR 외부 조회(본주 단독) — 버튼 클릭 시에만 호출."""
+    return qt.fetch_fdr_snapshot(symbol)
+
+
+def clear_price_caches():
+    """가격 새로고침: 계산용 가격 캐시만 초기화(가격 쌍·외부 조회 포함). 다른 탭 무영향."""
+    latest_price.clear()
+    db_quote_pair.clear()
+    db_single_quote.clear()
+    fdr_quote_pair.clear()
+    fdr_single_quote.clear()
+
+
+def _ext_quote(record_id):
+    """버튼으로 조회한 외부(FDR) 가격 결과 — 세션에만 보관(DB 저장 없음)."""
+    try:
+        return st.session_state.get(f"{_EXT_QUOTE_PREFIX}{record_id}")
+    except Exception:
+        return None
+
+
+def _clear_ext_quotes():
+    try:
+        for k in [k for k in st.session_state.keys()
+                  if str(k).startswith(_EXT_QUOTE_PREFIX)]:
+            del st.session_state[k]
+    except Exception:
+        pass
+
+
+def _fetch_external_quote(r: dict):
+    """이 기록의 본주·ETF 한 쌍만 외부(FDR) 조회해 세션에 반영.
+    source·as_of가 일치할 때만 사용하고, 불일치·실패면 기존(DB) 기준을 유지한다."""
+    mg = r.get("market_group")
+    lev_sym = str(r.get("leverage_symbol") or "").strip()
+    base_s = _resolve_symbol(r.get("symbol"), mg)
+    if lev_sym:
+        res = fdr_quote_pair(base_s, _resolve_symbol(lev_sym, mg))
+        ok = res is not None and res.is_consistent
+    else:
+        res = fdr_single_quote(base_s)
+        ok = res is not None and res.is_valid()
+    if ok:
+        st.session_state[f"{_EXT_QUOTE_PREFIX}{r.get('id')}"] = res
+        st.toast("최신 가격을 반영했습니다 (세션 표시용 · DB 저장 없음)")
+        st.rerun()
+    elif res is not None:
+        st.toast("외부 가격 쌍 불일치 — 기존 기준 유지"
+                 + (f" ({getattr(res, 'reason', '')})" if getattr(res, "reason", "") else ""))
+    else:
+        st.toast("외부 가격 조회 실패 — 기존 기준 유지")
+
+
+def _basis_caption(c: dict, currency: str):
+    """가격 계산 근거 한 줄: 출처 · 기준일 · 본주 현재가 (· ETF 현재가)."""
+    if not c.get("provider"):
+        return None
+    parts = [f"가격 출처 {c['provider']}", f"기준일 {c.get('as_of') or '—'}",
+             f"본주 {_fmtp(c.get('base_now'), currency)}"]
+    if c.get("is_lev"):
+        parts.append(f"ETF {_fmtp(c.get('etf_now'), currency)}")
+    return " · ".join(parts)
+
+
 def _fmtp(v, currency):
     return format_price(v, currency) if v is not None else "—"
 
@@ -691,21 +802,41 @@ def _plain_target(t):
 
 def _trade_calc(r: dict):
     """기록 1건의 파생값 계산: 현재가·환산가·주당리스크·수량. 표시 전용.
-    레버리지 ETF가 있으면 2배 환산, 없으면 본주 가격 그대로(본주 단독 매매)."""
+    레버리지 ETF는 동일 출처·동일 기준일 가격 쌍(QuotePair)일 때만 2배 환산하고,
+    쌍이 불일치·부재면 환산가를 전부 None으로 보류한다. 기본 가격은 DB(Supabase),
+    외부(FDR) 조회 결과는 레코드별 버튼을 눌렀을 때만 세션에서 반영된다."""
     mg = r.get("market_group")
-    base_now = trade_price(r.get("symbol"), mg)
     lev_sym = str(r.get("leverage_symbol") or "").strip()
+    ext = _ext_quote(r.get("id"))
     if lev_sym:
-        etf_now = trade_price(lev_sym, mg)
-        conv = lambda t: lev_convert(etf_now, base_now, t)
+        pair = ext if isinstance(ext, qt.QuotePair) else db_quote_pair(
+            _resolve_symbol(r.get("symbol"), mg), _resolve_symbol(lev_sym, mg))
+        if pair is not None and pair.is_consistent:
+            base_now, etf_now = pair.base.price, pair.leverage.price
+            provider, as_of = pair.provider, pair.as_of
+            consistent, reason = True, ""
+            conv = lambda t: lev_convert(etf_now, base_now, t)
+        else:
+            base_now = etf_now = provider = as_of = None
+            consistent = False
+            reason = pair.reason if pair is not None else NO_COMMON_DAY_MSG
+            conv = lambda t: None     # 쌍 불일치·부재 — 환산 계산 보류
         trade_now = etf_now
     else:
+        snap = ext if isinstance(ext, qt.QuoteSnapshot) else db_single_quote(
+            _resolve_symbol(r.get("symbol"), mg))
+        base_now = snap.price if snap else None
+        provider = snap.provider if snap else None
+        as_of = snap.as_of if snap else None
         etf_now = None
         conv = _plain_target          # 본주 단독: 환산가 = 본주 목표가
         trade_now = base_now
+        consistent, reason = True, ""
     stop_lev = conv(r.get("stop"))
     out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev,
-           "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym)}
+           "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym),
+           "consistent": consistent, "reason": reason,
+           "provider": provider, "as_of": as_of}
     for i in (1, 2, 3, 4):
         e_lev = conv(r.get(f"entry{i}"))
         out[f"e{i}_lev"] = e_lev
@@ -759,8 +890,18 @@ def _render_trade_card(r: dict, currency: str):
             n3.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
         else:
             n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
+        basis = _basis_caption(c, currency)
+        if basis:
+            st.caption(f"📊 {basis}")
+        if c["is_lev"] and not c["consistent"]:
+            st.caption("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
+                       + (f" ({c['reason']})" if c.get("reason") else ""))
         if c["trade_now"] is None:
-            st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 가격 새로고침을 눌러보세요.")
+            st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 최신 가격 조회를 눌러보세요.")
+        fcol, _sp = st.columns([1, 2.2])
+        if fcol.button("🔍 최신 가격 조회", key=f"tr_fetch_{r.get('id')}",
+                       use_container_width=True):
+            _fetch_external_quote(r)   # 이 기록의 본주·ETF 한 쌍만 외부 조회
         if r.get("memo"):
             st.caption(f"📝 {r['memo']}")
         _render_trade_detail(r, currency)
@@ -778,6 +919,12 @@ def _render_trade_detail(r: dict, currency: str):
                   _fmtp(c["trade_now"], currency))
         b3.metric("시장", "국장" if r.get("market_group") == "KR" else "미장")
         b4.metric("상태", _ST_LABEL.get(r.get("status"), "—"))
+        basis = _basis_caption(c, currency)
+        if basis:
+            st.caption(f"📊 {basis}")
+        if c["is_lev"] and not c["consistent"]:
+            st.caption("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
+                       + (f" ({c['reason']})" if c.get("reason") else ""))
 
         # 2. 진입 계획 (환산가·주당 리스크·수량) — 본주 단독이면 환산가=본주가
         plan = []
@@ -826,13 +973,14 @@ def render_trade_tab():
     h1, h2 = st.columns([2.2, 1])
     h1.markdown(f"**가격 기준:** {st.session_state['price_asof']}")
     if h2.button("🔄 가격 새로고침", key="tr_price_refresh", use_container_width=True):
-        latest_price.clear()                       # 화면 계산용 가격 캐시 초기화
+        clear_price_caches()          # 가격 쌍·외부 조회 포함 계산용 캐시 초기화
+        _clear_ext_quotes()           # 레코드별 외부 조회 결과도 DB 기준으로 복귀
         st.session_state["price_asof"] = kst_now_str()
         st.toast("가격 기준을 새로고침했습니다 — 환산가/수량을 다시 계산합니다")
         st.rerun()
-    st.caption("본주 현재가는 Supabase DB 최신값(매 거래일 자동 갱신) 기준, 레버리지 ETF는 DB 또는 FDR 조회 기준입니다. "
-               "새로고침 버튼은 화면 계산용 가격 캐시를 초기화해 환산가/수량을 다시 계산하며, "
-               "DB 전체 가격을 새로 수집하지는 않습니다(수집은 일일 파이프라인 담당).")
+    st.caption("기본 가격은 Supabase DB의 본주·ETF 최신 공통 거래일 종가 쌍(동일 출처·동일 기준일)입니다. "
+               "최신 시세가 필요하면 각 기록의 '최신 가격 조회' 버튼으로 그 기록의 본주·ETF 한 쌍만 외부(FDR) 조회하며, "
+               "결과는 화면 표시용으로만 쓰고 DB에는 저장하지 않습니다(수집은 일일 파이프라인 담당).")
 
     mg_label = st.radio("시장", ["국장", "미장"], horizontal=True, key="tr_mg")
     market_group = "KR" if mg_label == "국장" else "US"
