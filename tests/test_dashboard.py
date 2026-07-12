@@ -161,6 +161,30 @@ def test_pnl_color():
     assert m.pnl_color(float("nan")) is None     # NaN → 색 미적용
 
 
+# ── 가격 출처·기준일 표시줄 ─────────────────────────────────
+def test_quote_basis_line_formats():
+    m = _dash()
+    assert m.quote_basis_line("Supabase", "2026-07-10") == \
+        "가격 기준 2026-07-10 종가 · Supabase"
+    assert m.quote_basis_line("FDR", "2026-07-12") == "가격 기준 2026-07-12 · FDR"
+    assert m.quote_basis_line(None, None) is None
+    assert "기준일 미상" in m.quote_basis_line("FDR", None)
+
+
+def test_pair_basis_line_consistent_and_inconsistent():
+    m = _dash()
+    good = m.make_quote_pair(m.make_snapshot("TEM", 61.5, "Supabase", "2026-07-10"),
+                             m.make_snapshot("TEMT", 24.4, "Supabase", "2026-07-10"))
+    assert m.pair_basis_line(good) == "가격 기준 2026-07-10 종가 · Supabase"
+    bad = m.make_quote_pair(m.make_snapshot("TEM", 61.5, "Supabase", "2026-07-10"),
+                            m.make_snapshot("TEMT", 24.4, "FDR", "2026-07-11"))
+    line = m.pair_basis_line(bad)
+    assert "불일치" in line and "Supabase" in line and "FDR" in line
+    assert m.pair_basis_line({"base": None, "leverage": None,
+                              "is_consistent": False, "reason": "가격 조회 실패"}) is None
+    assert m.pair_basis_line(None) is None
+
+
 # ── 내비게이션 헬퍼 (UI 1단계 — pills/radio 폴백) ─────────────
 def test_select_pills_empty_and_default():
     m = _dash()

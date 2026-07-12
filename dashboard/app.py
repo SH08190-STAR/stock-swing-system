@@ -718,6 +718,195 @@ def trade_price(symbol, market_group: str | None = None):
     return p
 
 
+def _resolve_symbol(symbol, market_group: str | None = None) -> str:
+    """조회용 심볼 확정: 정규화 + KR 종목명이면 정확일치 이름→코드 보조조회."""
+    s = normalize_symbol(symbol, market_group)
+    if s and market_group == "KR" and not s.isdigit():
+        code = kr_code_by_name(s)
+        if code:
+            return str(code)
+    return s
+
+
+# ── 가격 스냅샷/쌍 (QuoteSnapshot·QuotePair — dict 최소 구현) ─────────
+# 레버리지 기록의 본주·ETF 가격은 반드시 같은 출처+같은 기준일의 쌍으로만
+# 환산·수량 계산에 사용한다. DB 본주 + FDR ETF 같은 혼합 조합 금지.
+def make_snapshot(symbol, price, source, asof):
+    """QuoteSnapshot: {symbol, price, source(FDR/Supabase/Toss), asof(기준 거래일)}."""
+    return {"symbol": str(symbol or ""), "price": price,
+            "source": source, "asof": asof}
+
+
+def snap_valid(s) -> bool:
+    """스냅샷 유효성: 존재 + 가격 0 초과."""
+    try:
+        return bool(s) and s.get("price") is not None and float(s["price"]) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def check_quote_pair(base, etf):
+    """본주·ETF 스냅샷 쌍의 일관성 판정 → (ok, 사유). 계산 허용 조건:
+    두 가격 존재·양수, 출처 동일, 기준 거래일 동일."""
+    if not snap_valid(base):
+        return False, "본주 가격 없음"
+    if not snap_valid(etf):
+        return False, "ETF 가격 없음"
+    if base.get("source") != etf.get("source"):
+        return False, "가격 출처 불일치"
+    if not base.get("asof") or base.get("asof") != etf.get("asof"):
+        return False, "가격 기준일 불일치"
+    return True, ""
+
+
+def make_quote_pair(base, etf):
+    """QuotePair: {base, leverage, is_consistent, reason}."""
+    ok, reason = check_quote_pair(base, etf)
+    return {"base": base, "leverage": etf, "is_consistent": ok, "reason": reason}
+
+
+class TossQuoteProvider:
+    """Toss Securities Open API 자리표시자 — 실제 호출 미구현.
+    키·엔드포인트 확정 후 이 클래스만 구현하면 1순위로 동작한다(구조 준비용)."""
+    source = "Toss"
+
+    def get_single(self, symbol):
+        return None
+
+    def get_pair(self, base_symbol, etf_symbol):
+        return None
+
+
+class FDRQuoteProvider:
+    """FinanceDataReader 조회 — 본주·ETF를 같은 실행 흐름에서 함께 조회해 쌍 구성."""
+    source = "FDR"
+
+    def get_single(self, symbol):
+        if not symbol:
+            return None
+        try:
+            import FinanceDataReader as fdr
+            end = dt.date.today()
+            df = fdr.DataReader(str(symbol),
+                                (end - dt.timedelta(days=14)).isoformat(),
+                                end.isoformat())
+            if df is not None and len(df) and "Close" in df.columns:
+                s = df["Close"].dropna()
+                if len(s):
+                    v = float(s.iloc[-1])
+                    if v > 0:
+                        ix = s.index[-1]
+                        asof = ix.date().isoformat() if hasattr(ix, "date") else str(ix)
+                        return make_snapshot(symbol, v, self.source, asof)
+        except Exception:
+            pass
+        return None
+
+    def get_pair(self, base_symbol, etf_symbol):
+        base = self.get_single(base_symbol)
+        etf = self.get_single(etf_symbol)
+        if base is None and etf is None:
+            return None
+        return make_quote_pair(base, etf)   # 기준일 다르면 불일치로 판정됨
+
+
+class DatabaseQuoteProvider:
+    """Supabase 조회 — 쌍은 prices의 최신 공통 거래일 종가만 사용.
+    stocks.close와 prices.close를 임의로 섞지 않는다."""
+    source = "Supabase"
+
+    def get_single(self, symbol):
+        if not symbol:
+            return None
+        q = db.get_latest_quote(str(symbol))
+        if q:
+            return make_snapshot(symbol, q["price"], self.source, q.get("asof"))
+        return None
+
+    def get_pair(self, base_symbol, etf_symbol):
+        row = db.get_common_close_pair(str(base_symbol), str(etf_symbol))
+        if not row:
+            return None                     # 공통 거래일 없음 → 계산하지 않음
+        d, close_a, close_b = row
+        return make_quote_pair(make_snapshot(base_symbol, close_a, self.source, d),
+                               make_snapshot(etf_symbol, close_b, self.source, d))
+
+
+_QUOTE_PROVIDERS = (TossQuoteProvider(), FDRQuoteProvider(), DatabaseQuoteProvider())
+
+
+def resolve_quote_pair(base_symbol, etf_symbol):
+    """레버리지 가격 쌍 결정: Toss(미구현) → FDR(동일 출처·기준일) →
+    DB(최신 공통 거래일). 일관된 쌍이 없으면 첫 조회 결과를 표시용으로만 담아
+    is_consistent=False로 반환한다(환산·수량 계산에는 사용하지 않음)."""
+    fallback = None
+    for p in _QUOTE_PROVIDERS:
+        pair = p.get_pair(base_symbol, etf_symbol)
+        if pair is None:
+            continue
+        if pair["is_consistent"]:
+            return pair
+        if fallback is None:
+            fallback = pair
+    if fallback is not None:
+        return fallback
+    return {"base": None, "leverage": None,
+            "is_consistent": False, "reason": "가격 조회 실패"}
+
+
+def resolve_single_quote(symbol):
+    """본주 단독 최신가: 기존 우선순위 유지(DB stocks→prices → FDR) + 출처·기준일."""
+    if not symbol:
+        return None
+    snap = DatabaseQuoteProvider().get_single(symbol)
+    if snap is None:
+        snap = FDRQuoteProvider().get_single(symbol)
+    return snap
+
+
+@st.cache_data(ttl=600)
+def quote_pair_cached(base_symbol: str, etf_symbol: str):
+    """본주·ETF 가격 쌍 캐시(10분) — 쌍 단위로 저장돼 한쪽만 갱신될 수 없다."""
+    return resolve_quote_pair(base_symbol, etf_symbol)
+
+
+@st.cache_data(ttl=600)
+def single_quote_cached(symbol: str):
+    """본주 단독 스냅샷 캐시(10분)."""
+    return resolve_single_quote(symbol)
+
+
+def clear_price_caches():
+    """가격 새로고침: 계산용 가격 캐시만 표적 초기화(본주·ETF 쌍 캐시 함께).
+    관심종목·매매기록·섹터 캐시(load_data 등)에는 영향을 주지 않는다."""
+    latest_price.clear()
+    quote_pair_cached.clear()
+    single_quote_cached.clear()
+
+
+def quote_basis_line(source, asof):
+    """가격 출처·기준시각 표시줄: '가격 기준 2026-07-10 종가 · Supabase' 형식."""
+    if not source:
+        return None
+    asof_txt = str(asof) if asof else "기준일 미상"
+    if source == "Supabase":
+        return f"가격 기준 {asof_txt} 종가 · Supabase"
+    return f"가격 기준 {asof_txt} · {source}"
+
+
+def pair_basis_line(pair):
+    """가격 쌍의 출처·기준일 표시줄. 불일치 시 양쪽 출처를 구분해 보여준다."""
+    if not pair:
+        return None
+    if pair.get("is_consistent") and pair.get("base"):
+        return quote_basis_line(pair["base"].get("source"), pair["base"].get("asof"))
+    parts = []
+    for label, s in (("본주", pair.get("base")), ("ETF", pair.get("leverage"))):
+        if s and s.get("price") is not None:
+            parts.append(f"{label} {s.get('source')} {s.get('asof') or '기준일 미상'}")
+    return ("가격 기준 불일치 — " + " · ".join(parts)) if parts else None
+
+
 def _fmtp(v, currency):
     return format_price(v, currency) if v is not None else "—"
 
@@ -856,22 +1045,38 @@ def _plain_target(t):
 
 
 def _trade_calc(r: dict):
-    """기록 1건의 파생값 계산: 현재가·환산가·주당리스크·수량. 표시 전용.
-    레버리지 ETF가 있으면 2배 환산, 없으면 본주 가격 그대로(본주 단독 매매)."""
+    """기록 1건의 파생값 계산: 현재가·예상 환산가·주당리스크·수량. 표시 전용.
+    레버리지 기록은 일관된 본주·ETF 가격 쌍(동일 출처+기준일)일 때만 환산·수량을
+    계산하고, 쌍이 불일치하면 환산가·수량을 모두 None으로 보류한다."""
     mg = r.get("market_group")
-    base_now = trade_price(r.get("symbol"), mg)
     lev_sym = str(r.get("leverage_symbol") or "").strip()
     if lev_sym:
-        etf_now = trade_price(lev_sym, mg)
-        conv = lambda t: lev_convert(etf_now, base_now, t)
+        pair = quote_pair_cached(_resolve_symbol(r.get("symbol"), mg),
+                                 _resolve_symbol(lev_sym, mg))
+        base_s, etf_s = pair.get("base"), pair.get("leverage")
+        base_now = base_s.get("price") if base_s else None
+        etf_now = etf_s.get("price") if etf_s else None
+        consistent = bool(pair.get("is_consistent"))
+        if consistent:
+            conv = lambda t: lev_convert(etf_now, base_now, t)
+        else:
+            conv = lambda t: None     # 혼합·불일치 가격으로는 환산하지 않음
         trade_now = etf_now
+        reason = pair.get("reason") or ""
+        basis = pair_basis_line(pair)
     else:
+        snap = single_quote_cached(_resolve_symbol(r.get("symbol"), mg))
+        base_now = snap.get("price") if snap else None
         etf_now = None
         conv = _plain_target          # 본주 단독: 환산가 = 본주 목표가
         trade_now = base_now
+        consistent, reason = True, ""
+        basis = (quote_basis_line(snap.get("source"), snap.get("asof"))
+                 if snap else None)
     stop_lev = conv(r.get("stop"))
     out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev,
-           "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym)}
+           "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym),
+           "consistent": consistent, "reason": reason, "basis": basis}
     for i in (1, 2, 3, 4):
         e_lev = conv(r.get(f"entry{i}"))
         out[f"e{i}_lev"] = e_lev
@@ -920,7 +1125,7 @@ def _render_trade_card(r: dict, currency: str):
         n1, n2, n3 = st.columns(3)
         n1.metric("1차 수량", c["qty1"] if c["qty1"] is not None else "—")
         n2.metric("손절", _fmtp(r.get("stop"), currency))
-        n2.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
+        n2.caption(f"예상 환산가 {_fmtp(c['stop_lev'], currency)}")
         if status == "completed":
             pnl = r.get("realized_total_pnl")
             color = pnl_color(pnl)
@@ -935,6 +1140,11 @@ def _render_trade_card(r: dict, currency: str):
                     unsafe_allow_html=True)
         else:
             n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
+        if c.get("basis"):
+            st.caption(f"🕒 {c['basis']}")
+        if c["is_lev"] and not c["consistent"]:
+            st.caption("⚠ 본주와 ETF 가격 기준이 달라 예상 환산가 계산을 보류했습니다."
+                       + (f" ({c['reason']})" if c.get("reason") else ""))
         if c["trade_now"] is None:
             st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 가격 새로고침을 눌러보세요.")
         if r.get("memo"):
@@ -954,8 +1164,13 @@ def _render_trade_detail(r: dict, currency: str):
                   _fmtp(c["trade_now"], currency))
         b3.metric("시장", "국장" if r.get("market_group") == "KR" else "미장")
         b4.metric("상태", _ST_LABEL.get(r.get("status"), "—"))
+        if c.get("basis"):
+            st.caption(f"🕒 {c['basis']}")
+        if c["is_lev"] and not c["consistent"]:
+            st.caption("⚠ 본주와 ETF 가격 기준이 달라 예상 환산가 계산을 보류했습니다."
+                       + (f" ({c['reason']})" if c.get("reason") else ""))
 
-        # 2. 진입 계획 (환산가·주당 리스크·수량) — 본주 단독이면 환산가=본주가
+        # 2. 진입 계획 (예상 환산가·주당 리스크·수량) — 본주 단독이면 환산가=본주가
         plan = []
         for i in (1, 2, 3, 4):
             e, e_lev, risk, qty = r.get(f"entry{i}"), c[f"e{i}_lev"], r.get(f"risk{i}"), c[f"qty{i}"]
@@ -964,8 +1179,8 @@ def _render_trade_detail(r: dict, currency: str):
             per = (e_lev - c["stop_lev"]) if (e_lev is not None and c["stop_lev"] is not None) else None
             plan.append({
                 "구분": f"{i}차", "본주 진입가": _fmtp(e, currency),
-                "환산가": _fmtp(e_lev, currency),
-                "손절 환산가": _fmtp(c["stop_lev"], currency),
+                "예상 환산가": _fmtp(e_lev, currency),
+                "손절 예상 환산가": _fmtp(c["stop_lev"], currency),
                 "주당 리스크": _fmtp(per, currency) if per is not None else "—",
                 "입력 리스크": risk if risk is not None else "—",
                 "계산 수량": qty if qty is not None else "—",
@@ -978,11 +1193,11 @@ def _render_trade_detail(r: dict, currency: str):
         st.markdown("**익절 / 손절**")
         t1, t2, t3 = st.columns(3)
         t1.metric("1차 익절", _fmtp(r.get("tp1"), currency))
-        t1.caption(f"환산 {_fmtp(c['conv'](r.get('tp1')), currency)}")
+        t1.caption(f"예상 환산가 {_fmtp(c['conv'](r.get('tp1')), currency)}")
         t2.metric("2차 익절", _fmtp(r.get("tp2"), currency))
-        t2.caption(f"환산 {_fmtp(c['conv'](r.get('tp2')), currency)}")
+        t2.caption(f"예상 환산가 {_fmtp(c['conv'](r.get('tp2')), currency)}")
         t3.metric("손절", _fmtp(r.get("stop"), currency))
-        t3.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
+        t3.caption(f"예상 환산가 {_fmtp(c['stop_lev'], currency)}")
 
         # 4. 완료 손익 (완료 상태만 — 총 손익은 저장 시 자동 계산값)
         if r.get("status") == "completed":
@@ -1002,12 +1217,13 @@ def render_trade_tab():
     h1, h2 = st.columns([2.2, 1])
     h1.markdown(f"**가격 기준:** {st.session_state['price_asof']}")
     if h2.button("🔄 가격 새로고침", key="tr_price_refresh", use_container_width=True):
-        latest_price.clear()                       # 화면 계산용 가격 캐시 초기화
+        clear_price_caches()          # 본주·ETF 가격 쌍 캐시를 함께 표적 초기화
         st.session_state["price_asof"] = kst_now_str()
-        st.toast("가격 기준을 새로고침했습니다 — 환산가/수량을 다시 계산합니다")
+        st.toast("가격 기준을 새로고침했습니다 — 예상 환산가/수량을 다시 계산합니다")
         st.rerun()
-    st.caption("본주 현재가는 Supabase DB 최신값(매 거래일 자동 갱신) 기준, 레버리지 ETF는 DB 또는 FDR 조회 기준입니다. "
-               "새로고침 버튼은 화면 계산용 가격 캐시를 초기화해 환산가/수량을 다시 계산하며, "
+    st.caption("레버리지 기록은 본주·ETF 가격을 같은 출처·같은 기준일의 쌍으로만 환산합니다 "
+               "(1순위 FDR 동시 조회, 2순위 Supabase 최신 공통 거래일 종가 — 혼합 금지, 불일치 시 계산 보류). "
+               "새로고침 버튼은 화면 계산용 가격 쌍 캐시를 함께 초기화해 예상 환산가/수량을 다시 계산하며, "
                "DB 전체 가격을 새로 수집하지는 않습니다(수집은 일일 파이프라인 담당).")
 
     mg_label = st.radio("시장", ["국장", "미장"], horizontal=True, key="tr_mg")
@@ -1097,8 +1313,8 @@ def render_trade_tab():
 
     # 기록 카드 목록 (모바일 가독성 — 표 대신 카드 + 상세 expander)
     if records:
-        st.caption("레버리지 ETF 입력 시: 환산가 = ETF 현재가 × (1 + 본주 변동률 × 2). "
-                   "ETF 미입력(본주 매매) 시: 환산가 = 본주 가격 그대로. "
+        st.caption("레버리지 ETF 입력 시: 예상 환산가 = ETF 현재가 × (1 + 본주 변동률 × 2). "
+                   "ETF 미입력(본주 매매) 시: 예상 환산가 = 본주 가격 그대로. "
                    "수량 = 리스크 ÷ (진입환산 − 손절환산), 일반 반올림 · 계획 표시용")
         for r in records:
             _render_trade_card(r, currency)
