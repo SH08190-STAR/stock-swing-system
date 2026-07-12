@@ -4,140 +4,57 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-완료  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
-
-## 완료 기록 (2026-07-13)
-- 안전장치 구축 커밋: 903842d
-- deploy-smoke false negative 수정 커밋: f40ba07 (push 완료)
-- deploy-smoke Actions **최초 실전 검증 성공** (소요 6분 22초)
-- 303 쿠키 부트스트랩 false negative 해결:
-  /_stcore/health가 share.streamlit.io로 303(쿠키 세팅) 후 앱 호스트로
-  복귀해 최종 200 → GET+쿠키 유지로 리다이렉트 추적, 최종 착지점 판정으로 해소
+검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
 ## 목표
-Streamlit Cloud 장애 재발 시 운영 서비스 중단과 반복 대응을 막기 위한
-배포 안전장치와 장애 대응 체계를 구축한다.
+revert로 제거된 ETF 환산 가격 일관성 기능을 최소 변경으로 재구현한다
+(브랜치 feature/quote-pair-v2, f4babe9는 설계 참고만 — cherry-pick 금지).
+UI/UX 구조는 변경하지 않는다.
 
-## 중요 제약
-- 앱 기능, DB, CSV, 가격 계산 로직은 변경하지 않는다
-- 현재 운영 앱이 정상일 때는 Reboot·revert·재배포하지 않는다
-- 이번 작업은 운영 문서, 검증 스크립트, CI, Claude Skill만 만든다
-- push는 사용자 승인 완료 (2026-07-13) — 안전장치 파일만 커밋
+## 핵심 규칙
+- 본주·레버리지 ETF 가격은 동일 공급자(provider) + 동일 기준일(as_of) 쌍만 환산 허용
+- 렌더 기본값: Supabase prices의 최신 공통 거래일 종가 쌍.
+  공통 거래일 없으면 환산 보류 + "동일 기준일의 가격 쌍을 찾을 수 없습니다"
+- 렌더 시 FDR 조회 금지. 외부(FDR) 조회는 레코드별 '최신 가격 조회' 버튼으로
+  그 기록의 본주·ETF 한 쌍만, source·as_of 일치 시에만 사용, DB 저장 없음
+- 환산 공식·손절·수량(floor(x+0.5))·리스크·완료손익 규칙은 기존 그대로
+- 표시: 가격 계산 영역에 출처·기준일·본주가·ETF가 caption
 
-## 구현 항목
-
-### 1. docs/DEPLOYMENT_GUARDRAILS.md
-- 기능 브랜치 → 스테이징 → 10분 안정 확인 → main 순서
-- LAST_KNOWN_GOOD_COMMIT 관리
-- 배포 전/후 체크리스트
-- rollback 기준
-- Reboot 최대 1회
-- 연쇄 revert 금지
-
-### 2. docs/INCIDENT_PLAYBOOK.md
-- Python traceback / Segmentation fault / dependency install 실패 /
-  Cloud 일시 장애를 구분하는 절차
-- 로그 저장 형식
-- 재현 순서
-- 단일 조치 원칙
-
-### 3. docs/incidents/2026-07-12-streamlit-segfault.md
-- 이번 사건의 사실만 기록
-- 확정되지 않은 원인을 확정적으로 쓰지 않기
-- 실행한 조치와 결과 기록
-- 낭비된 반복 대응 방지사항 기록
-
-### 4. .claude/skills/incident-response/SKILL.md
-- 로그 우선 확보
-- 오류 분류
-- git commit 확인
-- 로컬/스테이징 재현
-- 한 번에 하나의 변수만 변경
-- 정상 보고 400자 이내
-- 전체 로그 채팅 출력 금지
-- 원인 확인 전 push/revert/reboot 금지
-
-### 5. scripts/predeploy_check.py
-검사 항목:
-- git status
-- secret 패턴
-- py_compile
-- 전체 테스트
-- requirements 설치 가능 여부
-- pip check
-- Streamlit 서버 실행
-- health 200
-- 최소 120초 생존
-- 종료코드와 결과 요약
-- 긴 출력은 .tmp에 저장
-
-### 6. scripts/cloud_smoke_check.py
-입력: 앱 URL
-동작:
-- 배포 대기
-- health endpoint 반복 확인
-- 최소 10분 안정성 검사 옵션
-- 실패 시 시각·HTTP 상태·연속 실패 수 기록
-- secret 출력 금지
-
-### 7. .github/workflows/deploy-smoke.yml
-- main push 후 실행
-- 적절한 대기 후 smoke script 실행
-- 실패 시 workflow 실패 처리
-- 앱 URL은 repository variable 또는 secret 사용
-- DB write 없음
-
-### 8. 의존성 고정 감사
-- 현재 requirements.txt의 direct dependency와 설치된 실제 버전 비교
-- 즉시 대량 pin하지 말고 docs/DEPENDENCY_LOCK_PLAN.md에
-  안전한 잠금 계획만 작성
-- runtime/dev dependency 분리안 제시
-- 스테이징 검증 전 requirements 변경 금지
-
-### 9. docs/PROJECT_STATE.md
-- LAST_KNOWN_GOOD_COMMIT 필드 추가
-- 현재 운영 안정 커밋은 실제 git 상태와 사용자 제공 사실을 기준으로 기록
-- 추측 금지
+## 구현 내용 (2026-07-13)
+- `app/quotes.py` (신규): QuoteSnapshot/QuotePair(frozen dataclass),
+  make_pair(일관성 판정), latest_common_close(공통 거래일 선택),
+  fetch_fdr_snapshot/fetch_fdr_pair(외부 조회, 순수 로직 — Streamlit 무의존)
+- `app/database.py`: get_latest_quote(가격+기준일), get_common_close_pair
+  (read-only select만 — DB write 없음)
+- `dashboard/app.py`: _resolve_symbol, db_quote_pair/db_single_quote
+  (ttl=600, max_entries=64), fdr_quote_pair/fdr_single_quote
+  (ttl=300, max_entries=32, 쌍 단위 — DataFrame 캐시 없음),
+  clear_price_caches, 레코드별 외부 조회(_fetch_external_quote, 세션 보관),
+  _trade_calc를 QuotePair 기반으로 재작성(불일치 시 환산 None 보류),
+  카드/상세에 근거 caption + 보류 안내 + '최신 가격 조회' 버튼
+- `tests/test_quotes.py` (신규 23개): 쌍 일관성 성공/날짜 불일치/출처 불일치,
+  공통 거래일 선택/없음/무효 close 제외, FDR 쌍 성공/한쪽 실패/asof 불일치,
+  db 함수 mock 검증, database 함수 존재·import 검증, _trade_calc ETF 환산·
+  본주 단독·보류·일반 반올림, 완료손익 규칙 보존
 
 ## 수정 허용 파일
-- docs/
-- .claude/skills/incident-response/SKILL.md
-- scripts/predeploy_check.py
-- scripts/cloud_smoke_check.py
-- .github/workflows/deploy-smoke.yml
-- docs/PROJECT_STATE.md
-- tests/ (신규 스크립트 테스트 추가 가능)
+- dashboard/app.py, app/database.py, app/quotes.py(신규),
+  tests/test_quotes.py(신규), docs/CURRENT_TASK.md
 
-## 수정 금지 파일
-- dashboard/app.py
-- app/
-- schema.sql
-- CSV
-- requirements.txt
-- DB
-- Streamlit Cloud 설정
+## 수정 금지
+- UI/UX 구조·탭 구조·CSS, CSV, schema.sql, requirements.txt,
+  GitHub workflow, DB 데이터(stock_targets, trade_records)
 
 ## DB write 허용 여부
-아니오
+아니오 (신규 DB 함수는 전부 read-only select)
 
 ## push 허용 여부
-예 (사용자 승인 — 커밋 메시지: fix: handle Streamlit auth redirects in smoke check)
-
-## 후속 수정 (2026-07-13, deploy-smoke false negative)
-- 증상: deploy-smoke의 cloud_smoke_check.py가 /_stcore/health에서 303만 받고
-  600초 실패. 실제 앱은 정상.
-- 원인: Streamlit이 share.streamlit.io로 303(쿠키 부트스트랩) 후 앱 호스트로
-  복귀해 최종 200. 기존 코드가 리다이렉트 미추적 + 쿠키 미보존.
-- 조치: GET + 쿠키 유지로 리다이렉트 최대 5회 추적, 최종 착지점으로만 판정.
-- 수정 파일: scripts/cloud_smoke_check.py, tests/test_cloud_smoke_check.py
+아니오 (스테이징 검증 후 사용자 승인 대기)
 
 ## 검증
-- 신규 Python 스크립트 py_compile
-- 신규 스크립트 단위 테스트
-- YAML 문법 검사
-- git diff --check
-- 앱 코드·DB·CSV·requirements 미변경 확인
-- 전체 앱 pytest는 앱 코드 미변경이므로 실행하지 않아도 됨
-
-## 미해결 사항
-- Streamlit 1.59.x segfault 원인 추적 및 업그레이드 재시도는 별도 작업
+- [x] py_compile (app/quotes.py, app/database.py, dashboard/app.py, tests)
+- [x] tests/test_quotes.py 23 passed
+- [x] 전체 pytest 141 passed (.tmp/pytest.log)
+- [x] git diff --check 통과
+- [ ] predeploy_check (health 200 + 120초 생존) — 진행 중
+- [ ] 매매기록 화면 실검수 (로컬 Streamlit 완전 재시작)

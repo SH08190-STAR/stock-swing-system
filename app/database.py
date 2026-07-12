@@ -256,6 +256,43 @@ def get_latest_price(symbol: str):
     return None
 
 
+def get_latest_quote(symbol: str):
+    """본주/ETF 최신 가격 + 기준일: stocks(close, data_date) 우선 → prices(close, date) → None.
+    get_latest_price 와 같은 우선순위에 기준일(as_of)만 더한 read-only 조회."""
+    try:
+        res = (client().table("stocks").select("close,data_date")
+               .eq("code", str(symbol)).execute())
+        if res.data:
+            v = _num(res.data[0].get("close"))
+            if v is not None and v > 0:
+                return {"price": v, "as_of": res.data[0].get("data_date")}
+        res = (client().table("prices").select("close,date").eq("code", str(symbol))
+               .order("date", desc=True).limit(1).execute())
+        if res.data:
+            v = _num(res.data[0].get("close"))
+            if v is not None and v > 0:
+                return {"price": v, "as_of": res.data[0].get("date")}
+    except Exception:
+        pass
+    return None
+
+
+def get_common_close_pair(sym_a: str, sym_b: str, lookback: int = 10):
+    """본주·ETF 두 종목의 prices 에서 최신 공통 거래일 close 쌍 (read-only).
+    반환 (date, close_a, close_b), 공통 거래일이 없거나 조회 실패면 None."""
+    from app.quotes import latest_common_close
+    try:
+        rows_a = (client().table("prices").select("date,close")
+                  .eq("code", str(sym_a)).order("date", desc=True)
+                  .limit(lookback).execute()).data or []
+        rows_b = (client().table("prices").select("date,close")
+                  .eq("code", str(sym_b)).order("date", desc=True)
+                  .limit(lookback).execute()).data or []
+        return latest_common_close(rows_a, rows_b)
+    except Exception:
+        return None
+
+
 def _num(x):
     try:
         if x is None:
