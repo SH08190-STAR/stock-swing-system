@@ -291,6 +291,27 @@ def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
     return results
 
 
+# ── FDR(yfinance 백엔드) end 경계 보정 (미국 수집 전용) ──────
+# FDR/yfinance DataReader의 end는 exclusive(끝날 미포함)다. latest_trading_day를
+# 그대로 end로 넘기면 그 '최신 완료 거래일'이 빠진다(예: end=07-10 → 07-09까지만).
+# KR 수집(_fetch_fdr 직접 사용)은 의미가 다를 수 있어 건드리지 않고, 해외(US) 경로만 보정한다.
+def fdr_end_exclusive(last_inclusive: dt.date) -> dt.date:
+    """last_inclusive(포함하려는 최신 완료 거래일)을 FDR 결과에 담기 위한 exclusive end.
+    yfinance end가 exclusive이므로 다음 calendar day를 돌려준다(금요일→토요일이어도 금요일 포함)."""
+    return last_inclusive + dt.timedelta(days=1)
+
+
+def fetch_fdr_through(code: str, start: dt.date, last_inclusive: dt.date):
+    """US FDR 수집용: last_inclusive 거래일까지 '포함'해 조회하고, 그 이후(미래·장중
+    미완료) 행은 저장 전에 제거한다. end=last_inclusive+1로 호출 → last_inclusive 포함,
+    반환 후 date<=last_inclusive만 남긴다. KR 경로는 이 함수를 쓰지 않는다."""
+    df = _fetch_fdr(code, start, fdr_end_exclusive(last_inclusive))
+    if df is None or len(df) == 0:
+        return df
+    keep = [(ix.date() if hasattr(ix, "date") else ix) <= last_inclusive for ix in df.index]
+    return df[keep]
+
+
 # ── 해외 종목 가격 수집 (표시용, 분류 미적용) ────────────────
 def fetch_foreign(symbol: str, name: str | None = None,
                   market: str | None = None, end: dt.date | None = None) -> dict:
@@ -313,7 +334,8 @@ def fetch_foreign(symbol: str, name: str | None = None,
     }
 
     try:
-        df = _fetch_fdr(symbol, start, end)   # FDR OHLCV (close/volume/value[추정])
+        # end(최신 완료 거래일)을 포함하도록 exclusive 경계 보정 + 이후 행 제거.
+        df = fetch_fdr_through(symbol, start, end)   # FDR OHLCV (close/volume/value[추정])
     except Exception as e:
         base["reason"] = f"fdr: {type(e).__name__} {e}"
         return base

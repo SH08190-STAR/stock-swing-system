@@ -3,6 +3,19 @@
 > 목적: 활성 trade_records의 본주·레버리지 ETF 가격을 `prices`에 채워
 > 레버리지 거래가 DB 동일 기준일 쌍으로 자동 환산되게 한다.
 
+## ⚠️ 2차 정정: FDR end-exclusive 버그 + 본주 07-10 보정 (2026-07-13)
+
+- **FDR/yfinance DataReader의 `end`는 exclusive**(끝날 미포함)다. 실측: end=07-10 → 07-09까지만,
+  end=07-11/07-13 → 07-10 포함.
+- 기존 파이프라인이 `end = latest_trading_day()`를 그대로 FDR에 넘겨 **최신 완료 거래일을 한 거래일
+  누락**시켰다. 그래서 워치리스트 US 본주가 07-09에서 멈춤. (ETF 백필은 end=today로 조회해 07-10 포함.)
+- 결과적으로 대표 쌍 공통일이 07-09로 표시됨(본주 07-09 ∩ ETF 07-10).
+- **조치 A(코드)**: `app/collector.py`에 `fdr_end_exclusive`/`fetch_fdr_through` 헬퍼 추가.
+  미국(FDR) 수집만 end=최신완료거래일+1로 호출해 완료일 포함 + 이후 행 제거. **KR 경로 무변경.**
+- **조치 B(데이터)**: 워치리스트 US 본주 29개에 2026-07-10 행만 insert(`scripts/base_0710_backfill.py`).
+  **39-code ETF 백필과 별개 작업**(별도 allowlist/manifest). 29행 삽입, 기존 행 변경 0.
+- 결과: 활성 레버리지 **40건 전부 최신 공통일 2026-07-10**(US 39 + KR 1).
+
 ## ⚠️ 초기 진단 정정 (2026-07-13)
 
 - **"ETF 가격 전무" 진단은 잘못이었다.** 첫 진단 스크립트가 ETF prices를 "없음"으로

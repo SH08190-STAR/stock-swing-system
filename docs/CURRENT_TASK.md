@@ -6,6 +6,17 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
+## FDR end-exclusive 수정 + 본주 07-10 보정 (2026-07-13)
+- 문제: FDR/yfinance `end`가 exclusive라 파이프라인이 최신 완료 거래일을 1일 누락.
+  ETF 백필은 07-10 포함했으나 워치리스트 US 본주는 07-09에서 멈춤 → 공통일 07-09.
+- 코드 수정: app/collector.py에 fdr_end_exclusive/fetch_fdr_through 추가(미국 FDR만
+  end+1로 완료일 포함 + 이후 행 제거, KR 무변경). tests/test_fdr_end_boundary.py(8개).
+- 데이터 보정: scripts/base_0710_backfill.py로 US 본주 29개에 2026-07-10 행만 insert
+  (39-code ETF 백필과 분리된 allowlist/manifest, insert-only). 29행 삽입, canary 2(AAPL·NVDA)+full 27.
+- 결과: prices 58,342→58,371(+29), 기존 행 변경 0, 타 테이블 불변, 07-10 외 date write 0,
+  allowlist 밖 write 0. **레버리지 40건 최신 공통일 07-10(US 39+KR 1).**
+- 롤백: .tmp/quote_pair_base_0710_rollback.sql (삽입 29키만 삭제, 미실행).
+
 ## 후속 작업 (2026-07-13) — 레버리지 ETF 가격 수집 (경로 A)
 스테이징 검수에서 모든 레버리지 거래가 "동일 기준일 쌍 없음"으로 보류됨.
 원인: 레버리지 ETF 가격이 한 번도 수집되지 않음(수집 대상이 정적 워치리스트로
