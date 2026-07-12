@@ -39,6 +39,75 @@ from app import watchlist as wl
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
 
 
+# ── 런타임 모듈 정합성 가드 (Streamlit Cloud 부분 hot-reload 대비) ──────────
+# 여러 모듈이 동시에 바뀐 배포에서 Cloud가 dashboard/app.py만 새로 rerun하고
+# app.database 등 하위 모듈을 구버전으로 남기면, 새 코드가 부르는 함수가 없어
+# AttributeError로 전체 탭이 죽는다. 아래 가드는 계약(필수 속성 + API 버전) 불일치를
+# 감지하면 1회만 reload로 자동 복구하고, 정상일 때는 아무것도 하지 않는다.
+_DB_REQUIRED = ("get_latest_quote", "get_common_close_pair",
+                "get_active_trade_symbols", "code_by_name")
+_QT_REQUIRED = ("QuoteSnapshot", "QuotePair", "make_pair")
+_EXPECTED_DB_API = 2
+_EXPECTED_QT_API = 1
+
+
+def _module_contract_gaps(dbmod, qtmod) -> list:
+    """필수 속성 존재 + MODULE_API_VERSION 일치 검사. 불일치 항목명 리스트(빈=정상).
+    secret·경로·stack은 담지 않고 함수명/버전만 담는다(로그·화면 노출 안전용)."""
+    gaps = []
+    for a in _DB_REQUIRED:
+        if not hasattr(dbmod, a):
+            gaps.append(f"database.{a}")
+    for a in _QT_REQUIRED:
+        if not hasattr(qtmod, a):
+            gaps.append(f"quotes.{a}")
+    if getattr(dbmod, "MODULE_API_VERSION", None) != _EXPECTED_DB_API:
+        gaps.append(f"database.MODULE_API_VERSION={getattr(dbmod, 'MODULE_API_VERSION', None)}"
+                    f"!={_EXPECTED_DB_API}")
+    if getattr(qtmod, "MODULE_API_VERSION", None) != _EXPECTED_QT_API:
+        gaps.append(f"quotes.MODULE_API_VERSION={getattr(qtmod, 'MODULE_API_VERSION', None)}"
+                    f"!={_EXPECTED_QT_API}")
+    return gaps
+
+
+def check_and_recover_modules(dbmod, qtmod, *, importlib_mod=None,
+                              cache_clear=None, log=None):
+    """모듈 계약 검사 + 불일치 시 정확히 1회 reload 복구. 순수 함수(테스트 주입 가능).
+    반환 (dbmod, qtmod, status). status: reloaded/recovered/cache_cleared/gaps_before/gaps_after."""
+    gaps = _module_contract_gaps(dbmod, qtmod)
+    status = {"reloaded": False, "recovered": not gaps, "cache_cleared": False,
+              "gaps_before": gaps, "gaps_after": []}
+    if not gaps:
+        return dbmod, qtmod, status              # 정상 — reload 하지 않음
+    import importlib as _il_default
+    il = importlib_mod or _il_default
+    (log or (lambda m: None))(f"module contract mismatch, reload once: {gaps}")
+    il.invalidate_caches()
+    dbmod = il.reload(dbmod)
+    qtmod = il.reload(qtmod)
+    status["reloaded"] = True
+    gaps2 = _module_contract_gaps(dbmod, qtmod)
+    status["recovered"] = not gaps2
+    status["gaps_after"] = gaps2
+    if not gaps2 and cache_clear is not None:    # reload가 실제로 발생한 경우에만 캐시 초기화
+        try:
+            cache_clear()
+            status["cache_cleared"] = True
+        except Exception:
+            pass
+    return dbmod, qtmod, status
+
+
+db, qt, _MODULE_STATUS = check_and_recover_modules(
+    db, qt, cache_clear=st.cache_data.clear,
+    log=lambda m: print(f"[module-guard] {m}", file=sys.stderr))
+if not _MODULE_STATUS["recovered"]:
+    # 자동 복구 실패 — traceback으로 전체 앱을 죽이지 않고 안내 후 중단(내부 정보 비노출).
+    print(f"[module-guard] recover FAILED gaps={_MODULE_STATUS['gaps_after']}", file=sys.stderr)
+    st.error("배포 모듈 동기화에 실패했습니다. 앱을 한 번 재시작해 주세요.")
+    st.stop()
+
+
 # ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
 def gate() -> bool:
     if not config.APP_PASSWORD:
@@ -571,24 +640,45 @@ NO_COMMON_DAY_MSG = "동일 기준일의 가격 쌍을 찾을 수 없습니다"
 _EXT_QUOTE_PREFIX = "tr_ext_quote_"
 
 
+_QUOTE_ERR_LOGGED = set()
+
+
+def _log_quote_error_once(where: str, exc: Exception):
+    """가격 함수 실패를 서버 로그에 (where,예외타입)당 1회만 남긴다(조용히 숨기지 않되 스팸 방지)."""
+    key = f"{where}:{type(exc).__name__}"
+    if key not in _QUOTE_ERR_LOGGED:
+        _QUOTE_ERR_LOGGED.add(key)
+        print(f"[quote-pair] {where} 실패 — {type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 @st.cache_data(ttl=600, max_entries=64)
 def db_quote_pair(base_symbol: str, etf_symbol: str):
-    """DB prices의 최신 공통 거래일 close 쌍 → QuotePair. 공통 거래일 없으면 None."""
-    row = db.get_common_close_pair(base_symbol, etf_symbol)
-    if not row:
+    """DB prices의 최신 공통 거래일 close 쌍 → QuotePair. 공통 거래일 없으면 None.
+    모듈 불일치 등으로 예외가 나도 전체 매매 탭으로 전파하지 않고 None(해당 계산만 보류)."""
+    try:
+        row = db.get_common_close_pair(base_symbol, etf_symbol)
+        if not row:
+            return None
+        d, close_a, close_b = row
+        return qt.make_pair(qt.QuoteSnapshot(base_symbol, close_a, DB_PROVIDER, d),
+                            qt.QuoteSnapshot(etf_symbol, close_b, DB_PROVIDER, d))
+    except Exception as e:                       # AttributeError 등 — 격리
+        _log_quote_error_once("db_quote_pair", e)
         return None
-    d, close_a, close_b = row
-    return qt.make_pair(qt.QuoteSnapshot(base_symbol, close_a, DB_PROVIDER, d),
-                        qt.QuoteSnapshot(etf_symbol, close_b, DB_PROVIDER, d))
 
 
 @st.cache_data(ttl=600, max_entries=64)
 def db_single_quote(symbol: str):
-    """본주 단독 매매용 DB 최신가 스냅샷 (stocks→prices, 렌더 시 FDR 미사용)."""
-    q = db.get_latest_quote(symbol)
-    if q:
-        return qt.QuoteSnapshot(str(symbol), q["price"], DB_PROVIDER, q.get("as_of"))
-    return None
+    """본주 단독 매매용 DB 최신가 스냅샷 (stocks→prices, 렌더 시 FDR 미사용).
+    예외가 나도 전체 매매 탭으로 전파하지 않고 None(해당 계산만 보류)."""
+    try:
+        q = db.get_latest_quote(symbol)
+        if q:
+            return qt.QuoteSnapshot(str(symbol), q["price"], DB_PROVIDER, q.get("as_of"))
+        return None
+    except Exception as e:                       # AttributeError 등 — 격리
+        _log_quote_error_once("db_single_quote", e)
+        return None
 
 
 @st.cache_data(ttl=300, max_entries=32)

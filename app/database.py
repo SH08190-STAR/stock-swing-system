@@ -13,6 +13,10 @@ from __future__ import annotations
 import datetime as dt
 from app import config
 
+# 대시보드가 런타임 모듈 정합성을 확인하는 API 버전. quote-pair 함수(get_latest_quote,
+# get_common_close_pair 등)를 추가한 배포부터 2. 이 모듈 API가 바뀌면 값을 올린다.
+MODULE_API_VERSION = 2
+
 _client = None
 
 
