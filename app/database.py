@@ -225,6 +225,35 @@ def list_trade_records(market_group: str | None = None,
         return None
 
 
+def code_by_name(name: str):
+    """한국 종목명 정확일치 → 코드 (stocks 테이블, 유일 일치일 때만). read-only.
+    대시보드 kr_code_by_name과 동일 규칙 — 파이프라인이 이름으로 저장된 본주를
+    코드로 해소해 중복 수집/무의미한 이름 조회를 피하는 데 쓴다."""
+    try:
+        res = client().table("stocks").select("code").eq("name", str(name).strip()).execute()
+        if res.data and len(res.data) == 1:
+            return res.data[0]["code"]
+    except Exception:
+        pass
+    return None
+
+
+_ACTIVE_TRADE_STATUSES = ("waiting", "entered", "tp_in")
+
+
+def get_active_trade_symbols():
+    """활성(waiting/entered/tp_in) 매매기록의 market_group/symbol/leverage_symbol만
+    조회한다(완료 기록 제외 — load_active_trades와 동일한 '활성' 정의). read-only.
+    수집 대상 산출용이며, 실패(테이블 미존재 등) 시 빈 리스트."""
+    try:
+        res = (client().table("trade_records")
+               .select("market_group,symbol,leverage_symbol")
+               .in_("status", list(_ACTIVE_TRADE_STATUSES)).execute())
+        return res.data or []
+    except Exception:
+        return []
+
+
 def upsert_trade_record(rec: dict):
     """id가 있으면 update, 없으면 insert. 반환: record id(신규 insert 시 DB 생성값)."""
     payload = dict(rec)

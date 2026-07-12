@@ -102,6 +102,79 @@ def save_foreign(end, updated_at, last_ok=""):
     return len(f_rows), f_days
 
 
+def _looks_like_name(s: str) -> bool:
+    """KRX 코드(6자리 ASCII 영숫자, 예: '005930'·'0193W0')가 아니면 종목명으로 간주.
+    한글 등 비ASCII/길이 불일치는 이름 → FDR 티커 조회로는 해소 불가."""
+    s = str(s or "").strip()
+    if len(s) == 6 and s.isascii() and s.isalnum():
+        return False
+    return True
+
+
+def watchlist_collected_codes() -> set:
+    """이번 회차에 워치리스트로 이미 수집되는 code 집합(중복 fetch 방지용).
+    KR 종목코드 + 해외 티커를 수집 정규화 규칙으로 통일한다."""
+    codes = set()
+    for s in watchlist.all_korean_stocks():
+        c = collector.normalize_pipeline_symbol(s.get("code"), "KR")
+        if c:
+            codes.add(c)
+    for s in watchlist.all_global_stocks():
+        c = collector.normalize_pipeline_symbol(
+            s.get("ticker") or s.get("code") or s.get("symbol"), "US")
+        if c:
+            codes.add(c)
+    return codes
+
+
+def save_trade_symbol_prices(end, updated_at, last_ok=""):
+    """활성 trade_records의 본주·레버리지 심볼 중 워치리스트에 없는 것을 수집해
+    prices 테이블에만 저장한다(stocks/classification 미변경 → 워치리스트 탭 노출 없음).
+    - 본주와 ETF를 같은 회차·같은 end·같은 공급자 경로로 수집(동일 기준일 쌍 확보)
+    - KR 코드는 한국 수집기, 미국 티커는 FDR 글로벌 수집기 사용
+    - save_ohlcv는 on_conflict=code,date upsert라 같은 날짜 재실행에도 중복 행 없음
+    - 개별 티커 실패는 격리(로그만 남기고 다음 진행), trade_records/stocks/stock_targets 무변경
+    반환: {collected, saved_rows, skipped, failed, fail_codes}."""
+    summary = {"collected": 0, "saved_rows": 0, "skipped": 0, "failed": 0,
+               "unresolved": 0, "fail_codes": []}
+    trade_rows = db.get_active_trade_symbols()
+    targets = collector.build_trade_targets(trade_rows)
+    already = watchlist_collected_codes()
+    for mg, code in targets:
+        # KR 본주는 종목명으로 저장된 경우가 많다 → 코드로 해소(대시보드와 동일 규칙).
+        # 이름→코드가 워치리스트에 있으면 이미 수집된 것이라 스킵, 해소 실패한 순수
+        # 이름(코드 아님)은 FDR로 조회해도 404이므로 미해소로 집계하고 건너뛴다.
+        fetch_code = code
+        if mg == "KR" and not code.isdigit():
+            resolved = db.code_by_name(code)
+            if resolved:
+                fetch_code = str(resolved)
+        if fetch_code in already:                 # 워치리스트에서 이미 수집됨 → 중복 fetch 방지
+            summary["skipped"] += 1
+            continue
+        if mg == "KR" and not fetch_code.isdigit() and _looks_like_name(fetch_code):
+            summary["unresolved"] += 1            # 코드로 해소 못 한 순수 종목명 — 조회 불가
+            continue
+        try:
+            if mg == "KR":
+                r = collector.fetch_stock(fetch_code, fetch_code, "", end)
+            else:
+                r = collector.fetch_foreign(fetch_code, fetch_code, "", end)
+            if r.get("status") == "ok" and r.get("ohlcv") is not None:
+                rows = db.save_ohlcv(code, r.get("market", ""), r["ohlcv"])   # prices만
+                summary["collected"] += 1
+                summary["saved_rows"] += rows
+            else:
+                summary["failed"] += 1
+                summary["fail_codes"].append(code)
+                db.log_error(f"매매심볼:{code}", r.get("reason") or "수집 실패", "건너뜀", last_ok)
+        except Exception as e:
+            summary["failed"] += 1
+            summary["fail_codes"].append(code)
+            db.log_error(f"매매심볼:{code}", str(e), "건너뜀", last_ok)
+    return summary
+
+
 def main():
     config.validate_for_collector()
     last_ok = db.get_meta("last_ok_update")
@@ -197,6 +270,18 @@ def main():
     except Exception as e:
         db.log_error("해외수집", str(e), "건너뜀", db.get_meta("last_ok_update"))
         print("해외 수집 단계 실패(한국 결과는 유지):", e)
+
+    # 10) 매매기록 심볼(본주·레버리지 ETF) 가격 수집 — prices만 저장. 개별/전체 실패 격리.
+    #     레버리지 거래가 DB 동일 기준일 쌍으로 자동 환산되게 하는 데이터 공급 단계.
+    try:
+        ts = save_trade_symbol_prices(end, updated_at, last_ok)
+        print(f"매매 심볼 수집 — 수집 {ts['collected']} / 저장 {ts['saved_rows']}행 / "
+              f"스킵 {ts['skipped']} / 미해소 {ts.get('unresolved', 0)} / 실패 {ts['failed']}")
+        if ts["fail_codes"]:
+            print("  실패 심볼:", ",".join(ts["fail_codes"][:20]))
+    except Exception as e:
+        db.log_error("매매심볼수집", str(e), "건너뜀", db.get_meta("last_ok_update"))
+        print("매매 심볼 수집 단계 실패(다른 결과는 유지):", e)
 
 
 if __name__ == "__main__":

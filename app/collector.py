@@ -241,6 +241,36 @@ def fetch_stock(code: str, name: str, market: str,
     }
 
 
+# ── 매매기록 심볼 수집 대상 산출 (순수 로직, 네트워크·DB 무의존) ──
+def normalize_pipeline_symbol(symbol, market_group: str | None = None) -> str:
+    """수집용 심볼 정규화 (대시보드 normalize_symbol과 동일 규칙).
+    - 숫자만이면 한국 코드로 보고 zfill(6): '5930' → '005930'
+    - KR의 비숫자(예: 레버리지 ETF 코드 '0193W0')는 그대로
+    - 그 외(미국 티커)는 대문자. 빈 값이면 빈 문자열."""
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    if s.isdigit():
+        return s.zfill(6)
+    if market_group == "KR":
+        return s
+    return s.upper()
+
+
+def build_trade_targets(trade_rows) -> list[tuple]:
+    """활성 매매기록 rows → 수집 대상 (market_group, code) 목록.
+    본주 symbol + 비어있지 않은 leverage_symbol을 정규화해 중복·빈값 제거 후 정렬 반환.
+    stocks 테이블에는 추가하지 않으며, 여기 결과는 prices 수집 대상일 뿐이다."""
+    out = set()
+    for r in (trade_rows or []):
+        mg = r.get("market_group")
+        for key in ("symbol", "leverage_symbol"):
+            code = normalize_pipeline_symbol(r.get(key), mg)
+            if code:
+                out.add((mg, code))
+    return sorted(out)
+
+
 def collect_all(stocks: list[dict], end: dt.date) -> list[dict]:
     """
     워치리스트 한국 종목 전체 수집.
