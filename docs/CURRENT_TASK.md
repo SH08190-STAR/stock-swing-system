@@ -4,7 +4,15 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-push 대기  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 -->
+완료  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+
+## 완료 기록 (2026-07-13)
+- 안전장치 구축 커밋: 903842d
+- deploy-smoke false negative 수정 커밋: f40ba07 (push 완료)
+- deploy-smoke Actions **최초 실전 검증 성공** (소요 6분 22초)
+- 303 쿠키 부트스트랩 false negative 해결:
+  /_stcore/health가 share.streamlit.io로 303(쿠키 세팅) 후 앱 호스트로
+  복귀해 최종 200 → GET+쿠키 유지로 리다이렉트 추적, 최종 착지점 판정으로 해소
 
 ## 목표
 Streamlit Cloud 장애 재발 시 운영 서비스 중단과 반복 대응을 막기 위한
