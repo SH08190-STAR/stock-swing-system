@@ -1,13 +1,10 @@
 """
 app.py — Z PICK 한국주식 워치리스트 대시보드 (Streamlit)
 
-내비게이션(모바일 중심 — UI 1단계 재편): 최상위 4탭
- 홈(요약) / 섹터(섹터 구성·종목 카드) / 매매(매매 기록) / 더보기(저빈도 조회)
-
-기존 요구 9종 기능은 삭제 없이 재배치:
- 전체·단기스윙·거래대금 순위·신규 편입·분류 이탈·변경 이력·확인 보류 → 더보기,
- 기존 섹터별 → 섹터 탭, 마지막 최신화 시각 → 상단 고정 캡션.
-검색은 화면당 최대 2개: 상단 통합 검색 + 현재 화면 내부 검색(섹터/매매).
+메뉴(요구 9종)
+ 1 전체 워치리스트   2 단기스윙종목     3 기존 섹터별
+ 4 오늘 신규 편입    5 오늘 분류 이탈   6 거래대금 순위
+ 7 변경 이력        8 확인 보류        9 마지막 최신화 시각(상단 고정)
 
 기능: 종목명/코드 검색, 거래대금순 정렬, 섹터 필터, KOSPI/KOSDAQ 필터,
       신규 편입만 보기, CSV 다운로드, 모바일 대응, 간이 비밀번호 보호.
@@ -39,118 +36,6 @@ from app import database as db
 from app import watchlist as wl
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
-
-# ── 전역 스타일 (폴리시 단계 — 표시만 담당, 기능은 CSS 미적용 시에도 동일 동작) ──
-# 원칙: 배경 연회색/카드 흰색, radius 16~20px, 약한 그림자, 주색 1개(#3182f6),
-#       숫자·상태 강조, 보조 정보는 작은 회색, 좌우 여백 14~16px.
-_GLOBAL_CSS = """
-/* 레이아웃: 배경·여백·상단 축소 */
-.stApp { background:#f2f4f6; color:#191f28; }
-[data-testid="stHeader"] { background:transparent; }
-.block-container { padding-top:1.1rem; padding-bottom:3rem;
-  padding-left:16px; padding-right:16px; max-width:820px; }
-.stApp, .block-container { overflow-x:hidden; }
-@media (max-width:480px){
-  .block-container { padding-left:14px; padding-right:14px; } }
-hr { margin:.7rem 0; border-color:#e5e8eb; }
-[data-testid="stVerticalBlock"] { gap:.65rem; }
-
-/* 텍스트 계층: 보조 정보는 작은 회색(최소 13px) */
-[data-testid="stCaptionContainer"] { color:#8b95a1 !important;
-  font-size:13px !important; }
-[data-testid="stCaptionContainer"] p { margin-bottom:0; line-height:1.35; }
-
-/* 최상위 4탭 → 둥근 세그먼트형 (선택만 흰색 강조, 가로 균등 분할) */
-.stTabs [data-baseweb="tab-list"] { background:#e8eaed; border-radius:14px;
-  padding:4px; gap:4px; display:flex; width:100%; }
-.stTabs [data-baseweb="tab"] { flex:1 1 0; justify-content:center;
-  height:38px; border-radius:11px; font-size:14px; font-weight:600;
-  color:#6b7684; background:transparent; padding:0 4px; }
-.stTabs [aria-selected="true"] { background:#fff; color:#191f28;
-  box-shadow:0 1px 3px rgba(0,0,0,.06); }
-.stTabs [data-baseweb="tab-highlight"],
-.stTabs [data-baseweb="tab-border"] { display:none; }
-
-/* 카드: st.container(border=True) → 흰색 라운드 카드 + 약한 그림자.
-   Streamlit 버전별 DOM 차이에 안전하도록 카드 첫 markdown의 .zp-card 마커로 식별,
-   구버전 wrapper 선택자도 병행. 미적용 시 기본 테두리 카드로 동작(기능 무영향). */
-[data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .zp-card) {
-  background:#fff !important; border:1px solid #eceef1 !important;
-  border-radius:18px !important; box-shadow:0 1px 3px rgba(25,31,40,.04); }
-div[data-testid="stVerticalBlockBorderWrapper"] { background:#fff;
-  border-radius:18px; border:1px solid #eceef1;
-  box-shadow:0 1px 3px rgba(25,31,40,.04); }
-div[data-testid="stVerticalBlockBorderWrapper"] > div {
-  border:none !important; border-radius:18px; }
-
-/* expander: 카드 안 보조 요소로 (시각적 중심 금지) */
-[data-testid="stExpander"] details { border:1px solid #eef0f3;
-  border-radius:12px; background:#fafbfc; }
-[data-testid="stExpander"] summary { font-size:13px; color:#6b7684; }
-
-/* metric: 숫자 크고 진하게, 라벨은 보조 계층 */
-[data-testid="stMetricLabel"] { font-size:13px; color:#8b95a1; }
-[data-testid="stMetricValue"] { font-size:1.5rem; font-weight:700;
-  letter-spacing:-.3px; color:#191f28; line-height:1.15; }
-[data-testid="stMetric"] { gap:2px; }
-
-/* 보조 텍스트 정렬: metric 바로 다음 caption(환산가·52주 고점 등)을
-   큰 숫자에 붙여 표시 — 블록 gap(.65rem)만 상쇄, 다른 caption엔 영향 없음 */
-[data-testid="stElementContainer"]:has(> [data-testid="stMetric"])
-  + [data-testid="stElementContainer"]:has([data-testid="stCaptionContainer"]) {
-  margin-top:-9px; }
-
-/* 검색·입력: 둥근 모서리 + 연한 테두리로 통일 */
-.stTextInput [data-baseweb="input"], .stNumberInput [data-baseweb="input"],
-.stDateInput [data-baseweb="input"],
-.stSelectbox [data-baseweb="select"] > div { border-radius:12px;
-  background:#fff; border-color:#e5e8eb; }
-.stTextInput input::placeholder { color:#b0b8c1; }
-
-/* 버튼: 높이·radius·글자 크기 통일, primary는 주색 1개 */
-.stButton button, .stDownloadButton button, .stFormSubmitButton button {
-  border-radius:12px; min-height:40px; font-size:14px;
-  border:1px solid #e5e8eb; }
-.stButton button[kind="primary"],
-.stFormSubmitButton button[kind="primary"] { background:#3182f6;
-  border-color:#3182f6; }
-
-/* pills 칩: 선택만 진한 배경, 높이·간격 고정 */
-button[data-testid="stBaseButton-pills"],
-button[data-testid="stBaseButton-pillsActive"] { border-radius:999px;
-  min-height:34px; padding:2px 14px; font-size:13px; white-space:nowrap; }
-button[data-testid="stBaseButton-pills"] { background:#fff; color:#4e5968;
-  border:1px solid #e5e8eb; }
-button[data-testid="stBaseButton-pillsActive"] { background:#191f28;
-  color:#fff; border:1px solid #191f28; }
-
-/* radio(시장/상태 등) → 칩 모양 (미적용 브라우저에서도 기능 동일) */
-.stRadio [role="radiogroup"] { gap:8px; flex-wrap:wrap; }
-.stRadio [role="radiogroup"] label { background:#fff;
-  border:1px solid #e5e8eb; border-radius:999px; padding:5px 14px;
-  margin:0; min-height:34px; align-items:center; }
-.stRadio [role="radiogroup"] label:has(input:checked) { background:#191f28;
-  border-color:#191f28; }
-.stRadio [role="radiogroup"] label:has(input:checked) p { color:#fff; }
-.stRadio [role="radiogroup"] label > div:first-child { display:none; }
-"""
-st.markdown(f"<style>{_GLOBAL_CSS}</style>", unsafe_allow_html=True)
-
-
-def pnl_color(v) -> str | None:
-    """완료 손익 표시색: 수익 빨강 / 손실 파랑 (국내 증권 규칙) / 0·숫자 아님 중립.
-    숫자로 못 읽으면 None(색 미적용)."""
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if pd.isna(f):
-        return None
-    if f > 0:
-        return "#f04452"
-    if f < 0:
-        return "#3182f6"
-    return "#333d4b"
 
 
 # ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
@@ -222,57 +107,6 @@ def csv_download(df: pd.DataFrame, label: str, fname: str):
     df.to_csv(buf, index=False)
     st.download_button(label, buf.getvalue().encode("utf-8-sig"),
                        file_name=fname, mime="text/csv")
-
-
-def select_pills(label: str, options, default_idx: int = 0, key=None):
-    """모바일 가로 선택 메뉴: st.pills(Streamlit 1.40+) 사용,
-    미지원 버전은 기존 radio(horizontal)로 안전 폴백.
-    pills는 선택 해제(None)가 가능하므로 None이면 기본값으로 되돌린다."""
-    options = list(options)
-    if not options:
-        return None
-    if default_idx < 0 or default_idx >= len(options):
-        default_idx = 0
-    if hasattr(st, "pills"):
-        sel = st.pills(label, options, selection_mode="single",
-                       default=options[default_idx], key=key)
-        return sel if sel is not None else options[default_idx]
-    return st.radio(label, options, horizontal=True, index=default_idx, key=key)
-
-
-def render_filters(stocks: pd.DataFrame, key_prefix: str, with_search: bool = False):
-    """구(舊) 사이드바 필터 → 메인 화면 expander로 이동 (필터 로직 동일, 기능 삭제 없음).
-    반환: DataFrame 필터 함수. 검색 필드는 자체 검색이 없는 화면(더보기)에서만 노출해
-    화면당 검색창을 최대 2개(통합 + 현재 화면)로 유지한다."""
-    with st.expander("⚙️ 필터 — 국가·시장·섹터·정렬"):
-        q = st.text_input("종목명·코드 검색", key=f"{key_prefix}_fq") if with_search else ""
-        country_opts = sorted([c for c in stocks.get("country", pd.Series(dtype=str)).dropna().unique() if c])
-        country_sel = st.multiselect("국가", country_opts, default=country_opts,
-                                     key=f"{key_prefix}_fcountry")
-        market_opts = sorted([m for m in stocks["market"].dropna().unique() if m])
-        markets = st.multiselect("시장", market_opts, default=market_opts,
-                                 key=f"{key_prefix}_fmarket")
-        sectors = sorted([s for s in stocks["origin_sector"].dropna().unique() if s])
-        sec_sel = st.multiselect("기존 섹터", sectors, default=sectors,
-                                 key=f"{key_prefix}_fsector")
-        sort_by_value = st.checkbox("거래대금순 정렬", value=True, key=f"{key_prefix}_fsort")
-
-    def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
-        d = df.copy()
-        if q:
-            ql = q.lower()
-            d = d[d["name"].str.lower().str.contains(ql, na=False) |
-                  d["code"].str.contains(q, na=False)]
-        if country_sel and "country" in d.columns:
-            d = d[d["country"].isin(country_sel)]
-        if markets:
-            d = d[d["market"].isin(markets)]
-        if sec_sel:
-            d = d[d["origin_sector"].isin(sec_sel) | d["origin_sector"].isna()]
-        if sort_by_value and "avg_6m" in d.columns:
-            d = d.sort_values("avg_6m", ascending=False, na_position="last")
-        return d
-    return apply_filters
 
 
 def get_currency(row) -> str:
@@ -447,7 +281,7 @@ def _card_header_html(code: str, name: str, country: str, market: str, sector: s
                 "color:#fff;display:flex;align-items:center;justify-content:center;"
                 "font-weight:600;font-size:15px;flex:none;'>" + ch + "</div>")
     return (
-        "<div class='zp-card' style='display:flex;align-items:center;gap:10px;'>"
+        "<div style='display:flex;align-items:center;gap:10px;'>"
         + logo
         + "<div style='flex:1;min-width:0;'>"
         + f"<div style='font-size:16px;font-weight:600;line-height:1.2;'>{e(name)} "
@@ -907,7 +741,7 @@ def _render_trade_card(r: dict, currency: str):
     )
     with st.container(border=True):
         st.markdown(
-            f"<div class='zp-card' style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
+            f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
             f"<span style='font-size:17px;font-weight:600;'>{html.escape(str(r.get('symbol') or ''))}</span>"
             f"<span style='color:#9ca3af;font-size:12px;'>{html.escape(str(r.get('record_date') or ''))}</span>"
             f"<span>{badges}</span></div>",
@@ -922,17 +756,7 @@ def _render_trade_card(r: dict, currency: str):
         n2.metric("손절", _fmtp(r.get("stop"), currency))
         n2.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
         if status == "completed":
-            pnl = r.get("realized_total_pnl")
-            color = pnl_color(pnl)
-            if pnl is None or color is None:
-                n3.metric("총 손익", "—")
-            else:
-                # 수익 빨강/손실 파랑만 절제해 표시 (metric은 색 지정 불가 → 동급 마크업)
-                n3.markdown(
-                    "<div style='font-size:13px;color:#8b95a1;'>총 손익</div>"
-                    f"<div style='font-size:1.5rem;font-weight:700;color:{color};"
-                    f"letter-spacing:-.3px;'>{float(pnl):+,.0f}</div>",
-                    unsafe_allow_html=True)
+            n3.metric("총 손익", r.get("realized_total_pnl") if r.get("realized_total_pnl") is not None else "—")
         else:
             n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
         if c["trade_now"] is None:
@@ -1253,9 +1077,18 @@ def main():
     if "targets" not in st.session_state:
         st.session_state["targets"] = db.get_targets()
 
-    # 상단 고정: 마지막 최신화 시각(메뉴 9) + 데이터 기준일 — 상세 요약은 홈 탭으로 이동
-    st.caption(f"🕒 마지막 최신화: {last_update or '아직 갱신 전'} · 기준일 {last_date or '—'}"
-               " · 읽기 전용 (갱신은 매 거래일 16:40 자동)")
+    # 상단: 요약 + 마지막 최신화 시각 (메뉴 9)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    total_swing = int((stocks["classification"] == "swing").sum()) if len(stocks) else 0
+    total_sector = int((stocks["classification"] == "sector").sum()) if len(stocks) else 0
+    total_hold = int((stocks["classification"] == "hold").sum()) if len(stocks) else 0
+    total_global = int((stocks["classification"] == "global").sum()) if len(stocks) else 0
+    c1.metric("단기스윙", total_swing)
+    c2.metric("기존 섹터(한국)", total_sector)
+    c3.metric("확인 보류", total_hold)
+    c4.metric("해외(고정)", total_global)
+    c5.metric("데이터 기준일", last_date or "—")
+    st.caption(f"🕒 마지막 최신화: {last_update or '아직 갱신 전'}  ·  대시보드는 읽기 전용 (갱신은 매 거래일 16:40 자동)")
 
     if len(stocks) == 0:
         st.info("아직 데이터가 없습니다. update.py가 한 번 실행되면 채워집니다.")
@@ -1294,9 +1127,38 @@ def main():
             st.info("일치하는 종목·매매기록이 없습니다.")
         st.divider()
 
-    # 최상위 내비게이션 4탭 — 구 사이드바 필터는 섹터/더보기 화면 내부 expander로 이동,
-    # 구 9탭 화면은 삭제 없이 섹터/더보기 하위 메뉴로 재배치.
-    tabs = st.tabs(["홈", "섹터", "매매", "더보기"])
+    # 공통 필터 사이드바
+    st.sidebar.header("필터")
+    q = st.sidebar.text_input("종목명·코드 검색")
+    country_opts = sorted([c for c in stocks.get("country", pd.Series(dtype=str)).dropna().unique() if c])
+    country_sel = st.sidebar.multiselect("국가", country_opts, default=country_opts)
+    market_opts = sorted([m for m in stocks["market"].dropna().unique() if m])
+    markets = st.sidebar.multiselect("시장", market_opts, default=market_opts)
+    sectors = sorted([s for s in stocks["origin_sector"].dropna().unique() if s])
+    sec_sel = st.sidebar.multiselect("기존 섹터", sectors, default=sectors)
+    sort_by_value = st.sidebar.checkbox("거래대금순 정렬", value=True)
+
+    def apply_filters(df):
+        d = df.copy()
+        if q:
+            ql = q.lower()
+            d = d[d["name"].str.lower().str.contains(ql, na=False) |
+                  d["code"].str.contains(q, na=False)]
+        if country_sel and "country" in d.columns:
+            d = d[d["country"].isin(country_sel)]
+        if markets:
+            d = d[d["market"].isin(markets)]
+        if sec_sel:
+            d = d[d["origin_sector"].isin(sec_sel) | d["origin_sector"].isna()]
+        if sort_by_value and "avg_6m" in d.columns:
+            d = d.sort_values("avg_6m", ascending=False, na_position="last")
+        return d
+
+    tabs = st.tabs([
+        "전체", "단기스윙", "섹터 구성", "신규 편입",
+        "분류 이탈", "거래대금 순위", "변경 이력", "확인 보류",
+        "매매 기록",
+    ])
 
     # 현재 분류 섹터: swing → "단기스윙"(하나의 섹터로 모음), hold → "확인 보류",
     # 그 외(1,000억 초과)는 기존 섹터 유지. 워치리스트 원본(origin_sector)은 그대로 두고
@@ -1326,35 +1188,28 @@ def main():
                "origin_sector":"기존섹터","classification":"분류","data_date":"기준일"}
         return d[show].rename(columns=ren)
 
-    # 1) 홈 — 최소 요약만 (종목 카드는 섹터 탭, 매매기록은 매매 탭)
+    # 1) 전체
     with tabs[0]:
-        total_swing = int((stocks["classification"] == "swing").sum()) if len(stocks) else 0
-        counts = {"waiting": 0, "entered": 0, "tp_in": 0}
-        for t in load_all_trades():
-            s = t.get("status")
-            if s in counts:
-                counts[s] += 1
-        with st.container(border=True):
-            h1, h2, h3 = st.columns(3)
-            h1.metric("전체 종목", len(stocks))
-            h2.metric("단기스윙", total_swing)
-            h3.metric("진행 중 매매", sum(counts.values()))
-            chips = (_badge(f"대기중 {counts['waiting']}", "#E5E7EB", "#374151")
-                     + _badge(f"진입 {counts['entered']}", "#DBEAFE", "#1D4ED8")
-                     + _badge(f"TP IN {counts['tp_in']}", "#FEF3C7", "#92400E"))
-            st.markdown(f"<div class='zp-card'>{chips}</div>", unsafe_allow_html=True)
-        st.caption("종목 카드는 **섹터** 탭, 매매기록 관리는 **매매** 탭, 표·이력·CSV는 **더보기** 탭에 있습니다.")
+        d = apply_filters(stocks)
+        st.dataframe(view(d), use_container_width=True, hide_index=True)
+        csv_download(d, "⬇ 전체 CSV", "zpick_all.csv")
 
-    # 2) 섹터 — 메뉴형 섹터맵: 메뉴(전체/단기스윙/기존 섹터) 선택 → 종목을 상세 카드로
+    # 2) 단기스윙
     with tabs[1]:
-        apply_sec = render_filters(stocks, "sec", with_search=False)
-        base = apply_sec(stocks).copy()
+        d = apply_filters(stocks[stocks["classification"] == "swing"])
+        st.dataframe(view(d), use_container_width=True, hide_index=True)
+        csv_download(d, "⬇ 단기스윙 CSV", "zpick_swing.csv")
+
+    # 3) 섹터 구성 — 메뉴형 섹터맵: 메뉴(전체/단기스윙/M7/섹터) 선택 → 종목을 상세 카드로
+    with tabs[2]:
+        base = apply_filters(stocks).copy()
         base["__cat"] = cur_cat_series(base)
         order_key = lambda c: (c != "단기스윙", c == "확인 보류", str(c))
         cats_all = sorted(base["__cat"].dropna().unique(), key=order_key)
         menu = ["전체"] + cats_all
         default_idx = menu.index("단기스윙") if "단기스윙" in menu else 0
-        choice = select_pills("섹터 메뉴", menu, default_idx=default_idx, key="sector_menu")
+        choice = st.radio("섹터 메뉴", menu, horizontal=True,
+                          index=default_idx, key="sector_menu")
         # 메뉴 범위 내 로컬 검색 (read-only)
         local_q = st.text_input("이 메뉴에서 종목 검색", key="sector_q",
                                 placeholder="이름·코드 (예: 파두, 5930)")
@@ -1386,76 +1241,60 @@ def main():
         csv_download(base.drop(columns="__cat").assign(현재섹터=cur_cat_series(base)),
                      "⬇ 섹터구성 CSV (단기스윙 포함)", "zpick_categories.csv")
 
-    # 3) 매매 — 국장/미장 × 대기중/진입/TP IN/완료 + 레버리지 환산(2배 고정)
-    with tabs[2]:
-        render_trade_tab()
-
-    # 4) 더보기 — 저빈도 조회 화면(구 탭 7종)을 하위 메뉴로 재배치 (기능 삭제 없음)
+    # 4) 신규 편입 (오늘 history에서 swing 편입)
     with tabs[3]:
-        more_menu = ["전체 종목", "단기스윙", "거래대금 순위", "신규 편입",
-                     "분류 이탈", "변경 이력", "확인 보류"]
-        m_choice = select_pills("더보기 메뉴", more_menu, default_idx=0, key="more_menu")
+        if len(history):
+            today = last_date
+            ne = history[(history["change_date"] == today) &
+                         (history["to_class"] == "단기스윙")]
+            st.dataframe(ne, use_container_width=True, hide_index=True)
+            if len(ne) == 0:
+                st.info("오늘 신규 편입 종목이 없습니다.")
+        else:
+            st.info("이력이 아직 없습니다.")
 
-        # 종목 표 화면에만 필터 노출 (구 사이드바 검색 필드 포함 — 이 화면엔 자체 검색이 없음)
-        apply_more = None
-        if m_choice in ("전체 종목", "단기스윙", "거래대금 순위"):
-            apply_more = render_filters(stocks, "more", with_search=True)
+    # 5) 분류 이탈 (오늘 섹터 복귀)
+    with tabs[4]:
+        if len(history):
+            today = last_date
+            ex = history[(history["change_date"] == today) &
+                         (history["to_class"] == "기존섹터")]
+            st.dataframe(ex, use_container_width=True, hide_index=True)
+            if len(ex) == 0:
+                st.info("오늘 분류 이탈 종목이 없습니다.")
+        else:
+            st.info("이력이 아직 없습니다.")
 
-        if m_choice == "전체 종목":
-            d = apply_more(stocks)
-            st.dataframe(view(d), use_container_width=True, hide_index=True)
-            csv_download(d, "⬇ 전체 CSV", "zpick_all.csv")
+    # 6) 거래대금 순위
+    with tabs[5]:
+        d = stocks.dropna(subset=["avg_6m"]).sort_values("avg_6m", ascending=False)
+        d = apply_filters(d)
+        st.dataframe(view(d), use_container_width=True, hide_index=True)
 
-        elif m_choice == "단기스윙":
-            d = apply_more(stocks[stocks["classification"] == "swing"])
-            st.dataframe(view(d), use_container_width=True, hide_index=True)
-            csv_download(d, "⬇ 단기스윙 CSV", "zpick_swing.csv")
+    # 7) 변경 이력
+    with tabs[6]:
+        if len(history):
+            h = history.copy()
+            for col in ("prev_avg_6m", "new_avg_6m"):
+                if col in h.columns:
+                    h[col] = h[col].apply(eok)
+            st.dataframe(h, use_container_width=True, hide_index=True)
+            csv_download(history, "⬇ 이력 CSV", "zpick_history.csv")
+        else:
+            st.info("이력이 아직 없습니다.")
 
-        elif m_choice == "거래대금 순위":
-            d = stocks.dropna(subset=["avg_6m"]).sort_values("avg_6m", ascending=False)
-            d = apply_more(d)
-            st.dataframe(view(d), use_container_width=True, hide_index=True)
+    # 8) 확인 보류
+    with tabs[7]:
+        d = stocks[stocks["classification"] == "hold"]
+        cols = [c for c in ["name","code","market","origin_sector","reason","data_date"] if c in d.columns]
+        st.dataframe(d[cols].rename(columns={
+            "name":"종목명","code":"코드","market":"시장",
+            "origin_sector":"기존섹터","reason":"사유","data_date":"기준일"}),
+            use_container_width=True, hide_index=True)
 
-        elif m_choice == "신규 편입":
-            if len(history):
-                today = last_date
-                ne = history[(history["change_date"] == today) &
-                             (history["to_class"] == "단기스윙")]
-                st.dataframe(ne, use_container_width=True, hide_index=True)
-                if len(ne) == 0:
-                    st.info("오늘 신규 편입 종목이 없습니다.")
-            else:
-                st.info("이력이 아직 없습니다.")
-
-        elif m_choice == "분류 이탈":
-            if len(history):
-                today = last_date
-                ex = history[(history["change_date"] == today) &
-                             (history["to_class"] == "기존섹터")]
-                st.dataframe(ex, use_container_width=True, hide_index=True)
-                if len(ex) == 0:
-                    st.info("오늘 분류 이탈 종목이 없습니다.")
-            else:
-                st.info("이력이 아직 없습니다.")
-
-        elif m_choice == "변경 이력":
-            if len(history):
-                h = history.copy()
-                for col in ("prev_avg_6m", "new_avg_6m"):
-                    if col in h.columns:
-                        h[col] = h[col].apply(eok)
-                st.dataframe(h, use_container_width=True, hide_index=True)
-                csv_download(history, "⬇ 이력 CSV", "zpick_history.csv")
-            else:
-                st.info("이력이 아직 없습니다.")
-
-        elif m_choice == "확인 보류":
-            d = stocks[stocks["classification"] == "hold"]
-            cols = [c for c in ["name","code","market","origin_sector","reason","data_date"] if c in d.columns]
-            st.dataframe(d[cols].rename(columns={
-                "name":"종목명","code":"코드","market":"시장",
-                "origin_sector":"기존섹터","reason":"사유","data_date":"기준일"}),
-                use_container_width=True, hide_index=True)
+    # 9) 매매 기록 — 국장/미장 × 대기중/진입/TP IN/완료 + 레버리지 환산(2배 고정)
+    with tabs[8]:
+        render_trade_tab()
 
 
 if __name__ == "__main__":
