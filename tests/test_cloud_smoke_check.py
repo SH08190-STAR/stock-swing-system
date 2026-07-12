@@ -107,3 +107,124 @@ def test_run_stability_consecutive_counter_resets():
 
 def test_main_rejects_bad_url():
     assert smoke.main(["--url", "not-a-url"]) == 2
+
+
+# --- resolve_health: 리다이렉트 추적/분류 ---
+
+APP = "app.example"
+HEALTH = f"https://{APP}/_stcore/health"
+
+
+def make_get(mapping):
+    """url -> (status, location) 매핑을 따르는 가짜 GET. 없으면 (404, None)."""
+    def get(url):
+        return mapping.get(url, (404, None))
+    return get
+
+
+def test_resolve_health_immediate_200():
+    get = make_get({HEALTH: (200, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is True
+    assert r.reason == "ok"
+    assert r.final_status == 200
+
+
+def test_resolve_health_303_then_200_revisits_health():
+    # health 303 → 중간 경로 303 → health 재방문 시 (쿠키 세팅 후) 200.
+    # URL 재방문을 루프로 오판하지 않아야 한다 (실제 Streamlit 부트스트랩 패턴).
+    step = f"https://{APP}/-/login"
+    calls = {"n": 0}
+
+    def get(url):
+        if url == HEALTH:
+            calls["n"] += 1
+            return (303, step) if calls["n"] == 1 else (200, None)
+        if url == step:
+            return (303, HEALTH)
+        return (404, None)
+
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is True
+    assert r.first_status == 303
+    assert r.final_status == 200
+
+
+def test_resolve_health_uses_get_not_head():
+    req = smoke.build_get_request(HEALTH)
+    assert req.get_method() == "GET"
+
+
+def test_resolve_health_redirect_loop_fails():
+    a = f"https://{APP}/a"
+    b = f"https://{APP}/b"
+    get = make_get({HEALTH: (303, a), a: (303, b), b: (303, a)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is False
+    assert r.reason == "redirect_loop"
+
+
+def test_resolve_health_auth_page_fails():
+    login = f"https://{APP}/-/login"
+    get = make_get({HEALTH: (303, login), login: (200, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is False
+    assert r.reason == "auth_redirect"
+    assert r.final_status == 200
+
+
+def test_resolve_health_external_domain_fails():
+    ext = "https://share.streamlit.io/-/auth/app"
+    get = make_get({HEALTH: (303, ext), ext: (200, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is False
+    assert r.reason == "external_redirect"
+
+
+def test_resolve_health_external_then_back_succeeds():
+    # 외부(share.streamlit.io)를 경유하지만 앱 호스트로 되돌아와 200 → 성공
+    ext = "https://share.streamlit.io/-/auth/app"
+    get = make_get({HEALTH: (303, ext), ext: (303, HEALTH + "x"),
+                    HEALTH + "x": (200, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is True
+    assert r.reason == "ok"
+
+
+def test_resolve_health_timeout_fails():
+    get = make_get({HEALTH: (None, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is False
+    assert r.reason == "timeout"
+    assert r.final_status is None
+
+
+def test_resolve_health_bad_status_fails():
+    get = make_get({HEALTH: (500, None)})
+    r = smoke.resolve_health(HEALTH, get, APP)
+    assert r.ok is False
+    assert r.reason == "bad_status"
+    assert r.final_status == 500
+
+
+# --- classify_status: HealthResult → 폴링 정수 ---
+
+def test_classify_status_ok_is_200():
+    assert smoke.classify_status(smoke.HealthResult(True, "ok", final_status=200)) == 200
+
+
+def test_classify_status_timeout_is_none():
+    assert smoke.classify_status(smoke.HealthResult(False, "timeout", final_status=None)) is None
+
+
+def test_classify_status_auth_200_is_not_200():
+    # 최종 200이지만 auth/외부로 거부된 경우 200으로 취급하지 않는다
+    assert smoke.classify_status(
+        smoke.HealthResult(False, "external_redirect", final_status=200)
+    ) == -1
+
+
+def test_classify_status_bad_status_passthrough():
+    assert smoke.classify_status(
+        smoke.HealthResult(False, "bad_status", final_status=503)
+    ) == 503
