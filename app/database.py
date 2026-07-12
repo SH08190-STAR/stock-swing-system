@@ -256,61 +256,6 @@ def get_latest_price(symbol: str):
     return None
 
 
-def get_latest_quote(symbol: str):
-    """최신가 + 기준일: stocks(close, data_date) 우선 → prices 최신(close, date) → None.
-    get_latest_price와 같은 우선순위에 기준일(asof)만 덧붙인 read-only 조회.
-    NaN/0 이하 가격은 무효로 보고 다음 순위로 넘어간다."""
-    try:
-        res = (client().table("stocks").select("close,data_date")
-               .eq("code", str(symbol)).execute())
-        if res.data:
-            v = _num(res.data[0].get("close"))
-            if v is not None and v > 0:
-                return {"price": v, "asof": res.data[0].get("data_date")}
-        res = (client().table("prices").select("close,date").eq("code", str(symbol))
-               .order("date", desc=True).limit(1).execute())
-        if res.data:
-            v = _num(res.data[0].get("close"))
-            if v is not None and v > 0:
-                return {"price": v, "asof": res.data[0].get("date")}
-    except Exception:
-        pass
-    return None
-
-
-def latest_common_close(rows_a, rows_b):
-    """두 종목의 prices 행 목록([{date, close}, ...])에서 최신 공통 거래일의
-    close 쌍을 (date, close_a, close_b)로 반환. 공통 거래일이 없으면 None."""
-    def _valid_map(rows):
-        out = {}
-        for r in (rows or []):
-            v = _num(r.get("close"))
-            if r.get("date") and v is not None and v > 0:
-                out[r["date"]] = v
-        return out
-    map_a, map_b = _valid_map(rows_a), _valid_map(rows_b)
-    common = set(map_a) & set(map_b)
-    if not common:
-        return None
-    d = max(common)
-    return (d, map_a[d], map_b[d])
-
-
-def get_common_close_pair(sym_a: str, sym_b: str, lookback: int = 10):
-    """본주·ETF가 prices에 공통으로 가진 최신 거래일의 close 쌍.
-    (date, close_a, close_b) 또는 None. 각 종목의 개별 최신 날짜를 섞지 않는다."""
-    try:
-        rows_a = (client().table("prices").select("date,close")
-                  .eq("code", str(sym_a)).order("date", desc=True)
-                  .limit(lookback).execute()).data or []
-        rows_b = (client().table("prices").select("date,close")
-                  .eq("code", str(sym_b)).order("date", desc=True)
-                  .limit(lookback).execute()).data or []
-        return latest_common_close(rows_a, rows_b)
-    except Exception:
-        return None
-
-
 def _num(x):
     try:
         if x is None:
