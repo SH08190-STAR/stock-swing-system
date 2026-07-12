@@ -5,6 +5,18 @@
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
+## LAST_KNOWN_GOOD_COMMIT
+- `9975719` Revert "feat: refine dashboard spacing"
+- 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.**
+  "최신 저장소 커밋"과는 다른 개념이며, 2026-07-13 기준으로는 우연히
+  main HEAD와 동일할 뿐이다. 이후 push가 생기면 두 값은 달라질 수 있다.
+- 참고: 위의 a2e9a0e는 "상태 스냅샷 작성 기준 커밋"으로, 운영 정상
+  확인 커밋(LKG)과는 별개다.
+- 근거: 2026-07-12 streamlit==1.58.0 pin(974494e) 및 기능 커밋 revert 이후
+  이 커밋이 배포된 상태에서 운영 정상 (2026-07-13 사용자 확인 기준)
+- 갱신 규칙: 배포 후 smoke check + 10분 안정 확인 시에만 갱신
+  (docs/DEPLOYMENT_GUARDRAILS.md 참조)
+
 ## 기술 구조
 - Python 3.12 / Streamlit 대시보드 / Supabase(PostgreSQL)
 - 배포 흐름: GitHub main → Streamlit Cloud 자동 배포

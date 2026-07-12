@@ -1,0 +1,78 @@
+# main push(= Streamlit Cloud 재배포) 후 운영 앱 smoke check.
+# DB write 없음 — 외부에서 health endpoint만 읽는다.
+# 앱 URL은 repository variable(권장) 또는 secret STREAMLIT_APP_URL로 설정한다.
+#
+# 검사 시간 정책:
+#   - main push 자동 실행: 안정성 검사 3분(180초).
+#     근거: 2026-07-12 segfault가 시작 약 90초 뒤 발생 → 180초 이상 관찰 필요.
+#     매 push마다 10분을 돌려 Actions 시간을 과도하게 쓰지 않는다.
+#   - 10분 정밀 검사: workflow_dispatch 수동 실행으로 제공 (기본 10분).
+name: deploy-smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      stability_minutes:
+        description: "안정성 검사 시간(분)"
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+# 동일 브랜치의 중복 실행 방지 (연속 push 시 이전 검사 취소)
+concurrency:
+  group: deploy-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # URL 미설정이면 원인을 명확히 출력하고 job을 종료한다 (실패 아님).
+      # URL 값 자체는 로그에 출력하지 않는다 (secret일 수 있음).
+      - name: Resolve app URL
+        id: app
+        env:
+          VAR_URL: ${{ vars.STREAMLIT_APP_URL }}
+          SECRET_URL: ${{ secrets.STREAMLIT_APP_URL }}
+        run: |
+          if [ -n "$VAR_URL" ] || [ -n "$SECRET_URL" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "앱 URL 설정 확인됨 (값은 출력하지 않음)"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::smoke check 미실행 — 원인: repository variable 또는 secret STREAMLIT_APP_URL이 설정되지 않음. Settings > Secrets and variables > Actions에서 설정 필요."
+          fi
+
+      # push일 때만: Streamlit Cloud가 push를 감지하고 재배포를 시작할 시간을 준다
+      - name: Wait for Streamlit Cloud redeploy
+        if: steps.app.outputs.configured == 'true' && github.event_name == 'push'
+        run: sleep 180
+
+      # cloud_smoke_check.py는 stdlib만 사용하므로 pip install 불필요.
+      # health endpoint(/_stcore/health)를 연속 실패 기준(fail-threshold)으로
+      # 판정하고, 안정 여부를 exit code로 반환 → 실패 시 workflow 실패 처리.
+      - name: Run smoke check
+        if: steps.app.outputs.configured == 'true'
+        env:
+          APP_URL: ${{ vars.STREAMLIT_APP_URL != '' && vars.STREAMLIT_APP_URL || secrets.STREAMLIT_APP_URL }}
+          STABILITY_MINUTES: ${{ github.event_name == 'workflow_dispatch' && (inputs.stability_minutes || '10') || '3' }}
+        run: |
+          python scripts/cloud_smoke_check.py \
+            --url "$APP_URL" \
+            --deploy-timeout 600 \
+            --interval 20 \
+            --stability-minutes "$STABILITY_MINUTES" \
+            --fail-threshold 3
