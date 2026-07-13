@@ -64,3 +64,15 @@ LAST_KNOWN_GOOD_COMMIT 기준 브랜치를 만들어 검증 후 배포한다.
 - 한 배포에 한 종류의 변경만 싣는다 (기능 / 의존성 / 설정 혼합 금지)
 - requirements 변경은 단독 커밋 + 스테이징 검증 필수
   (계획: docs/DEPENDENCY_LOCK_PLAN.md)
+
+## 부분 hot-reload 주의 (여러 모듈 동시 변경 배포)
+
+- **health 200은 import된 하위 모듈의 런타임 정합성을 보장하지 않는다.** `/_stcore/health`는
+  서버 프로세스 생존만 확인할 뿐, dashboard가 부르는 app.database/app.quotes가 최신 버전인지는
+  검증하지 못한다.
+- 여러 Python 모듈이 한 배포에서 동시에 바뀌었는데 Streamlit Cloud가 "Updated app"만 표시하면,
+  최상위 스크립트만 새로 rerun하고 하위 모듈을 구버전으로 남기는 **부분 hot-reload** 가능성을
+  점검한다(증상: 배포 커밋에 존재하는 함수에 대한 AttributeError). → docs/INCIDENT_PLAYBOOK.md A-2.
+- 완화책: 앱에 런타임 모듈 정합성 가드(계약 검사 + 1회 reload 자동 복구)를 두었다
+  (dashboard/app.py `check_and_recover_modules`, app.*의 `MODULE_API_VERSION`). 모듈 API가 바뀌는
+  배포에서는 해당 버전을 올려 가드가 불일치를 감지하게 한다.

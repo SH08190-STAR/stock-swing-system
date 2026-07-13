@@ -26,6 +26,12 @@ Reboot하면 Cloud 로그가 사라진다.
 판정 팁:
 - B는 로그 마지막 줄이 갑자기 끊기는 형태가 많다. 시작 후 사망까지의 시간을 기록한다.
 - D를 A~C로 오판해 코드를 고치는 것이 최악의 낭비다. 먼저 https://status.streamlit.io 확인.
+- **A-2 부분 hot-reload(모듈 버전 불일치)**: AttributeError인데 **누락됐다는 함수/속성이
+  배포 커밋의 소스에는 분명히 존재**하면 코드 누락이 아니다. Streamlit Cloud가 여러 모듈이
+  동시에 바뀐 배포에서 최상위 스크립트(dashboard/app.py)만 새로 rerun하고 하위 모듈
+  (app.database 등)을 **구버전 프로세스에 남긴** 경우다. 판정 근거: 로컬 동일 커밋엔 함수 존재
+  + Cloud만 AttributeError. 1차 대응: 앱에 내장된 런타임 모듈 가드가 1회 reload로 자동 복구하므로
+  대개 rerun/재접속으로 해소된다. 해소 안 되면 Reboot 1회(D 준용). **revert 아님.**
 
 ## 2. 재현 순서 (수정 전 필수)
 

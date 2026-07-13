@@ -8,6 +8,9 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
+# 대시보드가 런타임 모듈 정합성을 확인하는 API 버전(QuoteSnapshot/QuotePair/make_pair 계약).
+MODULE_API_VERSION = 1
+
 
 @dataclass(frozen=True)
 class QuoteSnapshot:
