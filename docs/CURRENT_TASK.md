@@ -4,7 +4,15 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+완료  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+
+## 완료 기록 (2026-07-13)
+- ETF quote-pair v2 병합 `bc2055a` → 부분 hot-reload hotfix 병합 `b0219ab`, main HEAD=`b0219ab`.
+- tests·Deploy Smoke workflow 성공 + **운영 앱 실화면 확인 완료**(로그인·매매기록 탭·본주/ETF
+  카드·기준일 2026-07-10·환산값 정상, AttributeError·모듈 동기화 실패 없음).
+- LAST_KNOWN_GOOD_COMMIT을 `b0219ab`로 갱신(docs/PROJECT_STATE.md).
+- DB: prices 58,371, 레버리지 공통일 40/40, trade_records 64·stocks 188·stock_targets 2 불변.
+- 사건 기록: docs/incidents/2026-07-13-partial-hot-reload.md.
 
 ## FDR end-exclusive 수정 + 본주 07-10 보정 (2026-07-13)
 - 문제: FDR/yfinance `end`가 exclusive라 파이프라인이 최신 완료 거래일을 1일 누락.
