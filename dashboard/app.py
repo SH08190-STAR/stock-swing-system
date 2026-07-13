@@ -1392,12 +1392,6 @@ def main():
             d = d.sort_values("avg_6m", ascending=False, na_position="last")
         return d
 
-    tabs = st.tabs([
-        "전체", "단기스윙", "섹터 구성", "신규 편입",
-        "분류 이탈", "거래대금 순위", "변경 이력", "확인 보류",
-        "매매 기록",
-    ])
-
     # 현재 분류 섹터: swing → "단기스윙"(하나의 섹터로 모음), hold → "확인 보류",
     # 그 외(1,000억 초과)는 기존 섹터 유지. 워치리스트 원본(origin_sector)은 그대로 두고
     # 여기서 매 거래일 분류 결과로 현재 섹터만 산출한다(복귀 시 원래 섹터로 되돌리기 위함).
@@ -1426,61 +1420,17 @@ def main():
                "origin_sector":"기존섹터","classification":"분류","data_date":"기준일"}
         return d[show].rename(columns=ren)
 
-    # 1) 전체
-    with tabs[0]:
-        d = apply_filters(stocks)
-        st.dataframe(view(d), use_container_width=True, hide_index=True)
-        csv_download(d, "⬇ 전체 CSV", "zpick_all.csv")
+    # ── 상위 내비게이션 (홈·섹터·매매·더보기) ─────────────────────────
+    # st.tabs 대신 key 지정 horizontal radio를 써서, 매매 화면의 st.rerun() 후에도
+    # 현재 상위 메뉴 선택이 유지되도록 한다(기존 9개 기능은 하위 메뉴로 그대로 배치).
+    # 기존 탭 본문은 로직 변경 없이 조건 분기 아래로 재배치만 했다.
+    nav = st.radio("메뉴", ["홈", "섹터", "매매", "더보기"], horizontal=True,
+                   key="top_nav", label_visibility="collapsed")
 
-    # 2) 단기스윙
-    with tabs[1]:
-        d = apply_filters(stocks[stocks["classification"] == "swing"])
-        st.dataframe(view(d), use_container_width=True, hide_index=True)
-        csv_download(d, "⬇ 단기스윙 CSV", "zpick_swing.csv")
-
-    # 3) 섹터 구성 — 메뉴형 섹터맵: 메뉴(전체/단기스윙/M7/섹터) 선택 → 종목을 상세 카드로
-    with tabs[2]:
-        base = apply_filters(stocks).copy()
-        base["__cat"] = cur_cat_series(base)
-        order_key = lambda c: (c != "단기스윙", c == "확인 보류", str(c))
-        cats_all = sorted(base["__cat"].dropna().unique(), key=order_key)
-        menu = ["전체"] + cats_all
-        default_idx = menu.index("단기스윙") if "단기스윙" in menu else 0
-        choice = st.radio("섹터 메뉴", menu, horizontal=True,
-                          index=default_idx, key="sector_menu")
-        # 메뉴 범위 내 로컬 검색 (read-only)
-        local_q = st.text_input("이 메뉴에서 종목 검색", key="sector_q",
-                                placeholder="이름·코드 (예: 파두, 5930)")
-        sec_searched = bool(normalize_search_query(local_q))
-
-        if choice == "전체":
-            sub = base
-        else:
-            sub = base[base["__cat"] == choice]
-        if sec_searched:
-            sub = filter_stocks_by_query(sub, local_q)
-        if choice == "전체":
-            title = f"📂 전체 — {len(sub)}종목"
-        else:
-            label = "🔹 단기스윙 (1,000억 이하 · 섹터 통합)" if choice == "단기스윙" else f"🗂 {choice}"
-            title = f"{label} — {len(sub)}종목"
-        st.subheader(title)
-        st.divider()
-
-        if sub.empty:
-            st.info("이 메뉴에서 일치하는 종목이 없습니다." if sec_searched
-                    else "해당 메뉴에 표시할 종목이 없습니다. (사이드바 필터를 확인하세요)")
-        else:
-            if len(sub) > 60:
-                st.caption(f"종목이 많아({len(sub)}개) 로딩이 다소 걸릴 수 있어요. 메뉴로 좁혀 보세요.")
-            for rec in sub.to_dict("records"):
-                render_stock_card(rec, keyns="map")
-
-        csv_download(base.drop(columns="__cat").assign(현재섹터=cur_cat_series(base)),
-                     "⬇ 섹터구성 CSV (단기스윙 포함)", "zpick_categories.csv")
-
-    # 4) 신규 편입 (오늘 history에서 swing 편입)
-    with tabs[3]:
+    # 홈 — 오늘 신규 편입 / 오늘 분류 이탈
+    if nav == "홈":
+        # 신규 편입 (오늘 history에서 swing 편입)
+        st.subheader("오늘 신규 편입")
         if len(history):
             today = last_date
             ne = history[(history["change_date"] == today) &
@@ -1491,8 +1441,8 @@ def main():
         else:
             st.info("이력이 아직 없습니다.")
 
-    # 5) 분류 이탈 (오늘 섹터 복귀)
-    with tabs[4]:
+        # 분류 이탈 (오늘 섹터 복귀)
+        st.subheader("오늘 분류 이탈")
         if len(history):
             today = last_date
             ex = history[(history["change_date"] == today) &
@@ -1503,36 +1453,94 @@ def main():
         else:
             st.info("이력이 아직 없습니다.")
 
-    # 6) 거래대금 순위
-    with tabs[5]:
-        d = stocks.dropna(subset=["avg_6m"]).sort_values("avg_6m", ascending=False)
-        d = apply_filters(d)
-        st.dataframe(view(d), use_container_width=True, hide_index=True)
+    # 섹터 — 섹터 구성 / 전체 종목 / 단기스윙
+    elif nav == "섹터":
+        sec_view = st.radio("섹터 화면", ["섹터 구성", "전체 종목", "단기스윙"],
+                            horizontal=True, key="sector_subnav")
+        # 섹터 구성 — 메뉴형 섹터맵: 메뉴(전체/단기스윙/M7/섹터) 선택 → 종목을 상세 카드로
+        if sec_view == "섹터 구성":
+            base = apply_filters(stocks).copy()
+            base["__cat"] = cur_cat_series(base)
+            order_key = lambda c: (c != "단기스윙", c == "확인 보류", str(c))
+            cats_all = sorted(base["__cat"].dropna().unique(), key=order_key)
+            menu = ["전체"] + cats_all
+            default_idx = menu.index("단기스윙") if "단기스윙" in menu else 0
+            choice = st.radio("섹터 메뉴", menu, horizontal=True,
+                              index=default_idx, key="sector_menu")
+            # 메뉴 범위 내 로컬 검색 (read-only)
+            local_q = st.text_input("이 메뉴에서 종목 검색", key="sector_q",
+                                    placeholder="이름·코드 (예: 파두, 5930)")
+            sec_searched = bool(normalize_search_query(local_q))
 
-    # 7) 변경 이력
-    with tabs[6]:
-        if len(history):
-            h = history.copy()
-            for col in ("prev_avg_6m", "new_avg_6m"):
-                if col in h.columns:
-                    h[col] = h[col].apply(eok)
-            st.dataframe(h, use_container_width=True, hide_index=True)
-            csv_download(history, "⬇ 이력 CSV", "zpick_history.csv")
-        else:
-            st.info("이력이 아직 없습니다.")
+            if choice == "전체":
+                sub = base
+            else:
+                sub = base[base["__cat"] == choice]
+            if sec_searched:
+                sub = filter_stocks_by_query(sub, local_q)
+            if choice == "전체":
+                title = f"📂 전체 — {len(sub)}종목"
+            else:
+                label = "🔹 단기스윙 (1,000억 이하 · 섹터 통합)" if choice == "단기스윙" else f"🗂 {choice}"
+                title = f"{label} — {len(sub)}종목"
+            st.subheader(title)
+            st.divider()
 
-    # 8) 확인 보류
-    with tabs[7]:
-        d = stocks[stocks["classification"] == "hold"]
-        cols = [c for c in ["name","code","market","origin_sector","reason","data_date"] if c in d.columns]
-        st.dataframe(d[cols].rename(columns={
-            "name":"종목명","code":"코드","market":"시장",
-            "origin_sector":"기존섹터","reason":"사유","data_date":"기준일"}),
-            use_container_width=True, hide_index=True)
+            if sub.empty:
+                st.info("이 메뉴에서 일치하는 종목이 없습니다." if sec_searched
+                        else "해당 메뉴에 표시할 종목이 없습니다. (사이드바 필터를 확인하세요)")
+            else:
+                if len(sub) > 60:
+                    st.caption(f"종목이 많아({len(sub)}개) 로딩이 다소 걸릴 수 있어요. 메뉴로 좁혀 보세요.")
+                for rec in sub.to_dict("records"):
+                    render_stock_card(rec, keyns="map")
 
-    # 9) 매매 기록 — 국장/미장 × 대기중/진입/TP IN/완료 + 레버리지 환산(2배 고정)
-    with tabs[8]:
+            csv_download(base.drop(columns="__cat").assign(현재섹터=cur_cat_series(base)),
+                         "⬇ 섹터구성 CSV (단기스윙 포함)", "zpick_categories.csv")
+        # 전체 종목
+        elif sec_view == "전체 종목":
+            d = apply_filters(stocks)
+            st.dataframe(view(d), use_container_width=True, hide_index=True)
+            csv_download(d, "⬇ 전체 CSV", "zpick_all.csv")
+        # 단기스윙
+        elif sec_view == "단기스윙":
+            d = apply_filters(stocks[stocks["classification"] == "swing"])
+            st.dataframe(view(d), use_container_width=True, hide_index=True)
+            csv_download(d, "⬇ 단기스윙 CSV", "zpick_swing.csv")
+
+    # 매매 — 국장/미장 × 대기중/진입/TP IN/완료 + 레버리지 환산(2배 고정)
+    #        top_nav를 radio로 유지하므로 매매 화면의 st.rerun() 후에도 매매 메뉴가 유지된다.
+    elif nav == "매매":
         render_trade_tab()
+
+    # 더보기 — 거래대금 순위 / 변경 이력 / 확인 보류
+    elif nav == "더보기":
+        more_view = st.radio("더보기 화면", ["거래대금 순위", "변경 이력", "확인 보류"],
+                             horizontal=True, key="more_subnav")
+        # 거래대금 순위
+        if more_view == "거래대금 순위":
+            d = stocks.dropna(subset=["avg_6m"]).sort_values("avg_6m", ascending=False)
+            d = apply_filters(d)
+            st.dataframe(view(d), use_container_width=True, hide_index=True)
+        # 변경 이력
+        elif more_view == "변경 이력":
+            if len(history):
+                h = history.copy()
+                for col in ("prev_avg_6m", "new_avg_6m"):
+                    if col in h.columns:
+                        h[col] = h[col].apply(eok)
+                st.dataframe(h, use_container_width=True, hide_index=True)
+                csv_download(history, "⬇ 이력 CSV", "zpick_history.csv")
+            else:
+                st.info("이력이 아직 없습니다.")
+        # 확인 보류
+        elif more_view == "확인 보류":
+            d = stocks[stocks["classification"] == "hold"]
+            cols = [c for c in ["name","code","market","origin_sector","reason","data_date"] if c in d.columns]
+            st.dataframe(d[cols].rename(columns={
+                "name":"종목명","code":"코드","market":"시장",
+                "origin_sector":"기존섹터","reason":"사유","data_date":"기준일"}),
+                use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
