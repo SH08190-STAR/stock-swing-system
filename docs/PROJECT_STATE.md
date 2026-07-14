@@ -1,26 +1,25 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-14, commit 86333df. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-14, commit cd7f16c. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `86333df` merge: compact dashboard cards on mobile (2026-07-14 push)
-- UI/UX 2단계(모바일 카드 밀도 개선, dashboard/app.py + docs/CURRENT_TASK.md 변경) 배포이며
-  운영 검증까지 완료돼 아래 LKG와 동일하다.
+- `cd7f16c` merge: fix USD basis caption rendering (2026-07-14 push)
+- 미장 basis caption 달러 수식 렌더링 버그 수정(dashboard/app.py + tests/test_trades.py +
+  docs/CURRENT_TASK.md 변경) 배포이며 운영 검증까지 완료돼 아래 LKG와 동일하다.
 
 ## LAST_KNOWN_GOOD_COMMIT
-- `86333df` merge: compact dashboard cards on mobile (2026-07-14 갱신)
+- `cd7f16c` merge: fix USD basis caption rendering (2026-07-14 갱신)
 - 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
-- 근거: UI/UX 2단계 — 섹터 종목 카드·매매 기록 카드에 st.container(key=...)로 부여되는
-  `st-key-stock_card_*`/`st-key-trade_card_*` 클래스를 범위로 한 `@media (max-width:640px)`
-  전용 CSS만 추가(카드 padding·gap·metric·caption·expander 여백 압축). 계산·quote-pair·FDR·DB·
-  캐시·gate·reload guard·내비게이션·기존 위젯 key·색상/뱃지, requirements/schema/CSV/workflow 무변경.
-  2026-07-14 tests·Deploy Smoke workflow 성공 + 운영 앱 실화면 확인(모바일 섹터/본주/레버리지 카드
-  압축·상세 expander·가격/기준일/출처/환산값/수량·상단 metric/사이드바/검색/신규 기록 폼 정상·가로
-  스크롤/겹침/잘림 없음·데스크톱 레이아웃 정상·빨간 오류·AttributeError·모듈 동기화 실패 없음).
-- 이전 LKG `43088fa`(UI/UX 1단계)에서 갱신: 위 조건(앱 배포 + smoke 통과 + 운영 실화면 확인) 충족.
+- 근거: 미장 매매 카드 `_basis_caption` 반환에 `$`→`\$` escape 1줄만 추가(출력 문자열 전용).
+  st.caption(Markdown)이 USD `$a … $b`의 `$...$` 구간을 LaTeX 수식으로 렌더하던 문제 해소.
+  숫자 포맷·계산·저장값·모바일 CSS·내비게이션·DB 로직 무변경, requirements/schema/CSV/workflow 무변경.
+  2026-07-14 tests·Deploy Smoke Check 모두 success + 운영 앱 Reboot 후 실화면·10분 smoke 검증 완료
+  (미장 레버리지 basis 달러 일반 텍스트·초록 수식/백슬래시 없음·상세 expander·국장 원화 카드·모바일
+  압축 정상, Segmentation fault·traceback·프로세스 재시작 없음).
+- 이전 LKG `86333df`(UI/UX 2단계)에서 갱신: 위 조건(앱 배포 + smoke 통과 + 운영 실화면 확인) 충족.
 - 참고: `a2e9a0e`는 "상태 스냅샷 작성 기준 커밋"으로 LKG와 별개다.
 - 갱신 규칙: 배포 후 smoke check + 안정 확인 + 운영 실화면 확인 시에만 갱신
 
@@ -31,6 +30,45 @@
 - 2026-07-14: deploy-smoke #7 성공 (commit 43088fa, 소요 6분 29초). tests #30도 성공.
 - 2026-07-14: 커밋 86333df tests·Deploy Smoke Check 모두 success (main check-runs 확인).
   병합 전 스테이징(feature 6aab986) 3분 Cloud smoke PASS(검사 12회·연속 실패 0·303→200).
+- 2026-07-14: 커밋 cd7f16c tests·Deploy Smoke Check 모두 success (smoke 371초). 병합 전
+  독립 fresh 스테이징 2종(main control, basis-fix control-2 = 1e72627) 각 10분 Cloud smoke PASS
+  (검사 29회·연속 실패 0). 운영 앱 Reboot 후 10분 smoke PASS(검사 29회·연속 실패 0, 19:30~19:41 KST).
+
+## USD basis caption 표시 버그 수정 및 Streamlit Cloud 장애 대응 (2026-07-14)
+> 분류: UI/UX 단계 작업이 아니다(별도 버그 수정 + 운영 장애 대응). UI/UX 3단계(색상·간격·시각
+> 디자인 개선)는 미착수로 유지한다.
+
+- `cd7f16c` merge: fix USD basis caption rendering. fix/us-basis-caption-dollar-rendering(`1e72627`)를
+  --no-ff 병합. **변경 파일 3개**: dashboard/app.py(+7/-2: `_basis_caption` docstring + `$`→`\$`
+  escape 1줄), tests/test_trades.py(+36: basis escape 회귀 4건), docs/CURRENT_TASK.md.
+- 원인: `_basis_caption`이 USD 레버리지에서 "본주 $1,915.92 · ETF $28.06"처럼 `$` 2개 포함 문자열을
+  반환 → st.caption(Markdown)이 `$...$` 구간을 LaTeX 수식(KaTeX)으로 렌더(초록 이탤릭). 국장(원화)은
+  `$` 없음, 미장 본주 단독은 `$` 1개라 미발생.
+- 수정: 반환 직전 `.replace("$","\\$")` 1줄. 숫자 포맷·계산·저장값·모바일 CSS·내비게이션·DB 무변경.
+- **운영 검증 완료(2026-07-14, 사용자 확인)**: 미장 레버리지/본주 basis 달러 일반 텍스트(KaTeX 0·
+  백슬래시/초록 수식 없음)·상세 expander·국장 원화 카드·모바일 압축 정상. tests·Deploy Smoke Check
+  success. 운영 앱 Reboot 후 10분 smoke PASS.
+- DB: prices 58,371(레버리지 40/40 실조회)·trade_records 64·stocks 188·stock_targets 2 불변. DB write 없음.
+
+## 스테이징 배포 인스턴스 Segmentation fault 사건·복구 (2026-07-14)
+- 증상: basis-fix 병합 전 스테이징(`stock-swing-basis-fix-stagin`)에서 최초 실행 + 허용된 Reboot 1회
+  모두 Segmentation fault(최초 PID 189, Reboot 후 PID 182). Python traceback 없음, Supabase secret
+  오류 없음. (초기 브라우저 "Failed to fetch dynamically imported module"는 빌드/재기동 중 프론트
+  청크 fetch 실패로 별개 현상, 이후 "Oh no. Error running app.")
+- A/B 진단(읽기 전용): 동일 commit/tree(`1e72627`, tree `3f0d1a9`)를 별도 배포 좌표에 fresh 배포한
+  두 독립 앱(main control `kqf4sy24…`, basis-fix control-2)은 모두 정상 — 10분 smoke PASS(각 검사
+  29회·연속 실패 0), segfault·traceback·프로세스 재시작 없음. 설치 버전도 정상 조합(Python 3.12.13·
+  streamlit 1.58.0·numpy 2.5.1·pyarrow 25.0.0)에서 무결.
+  → fresh Cloud build/floating dependency "자체"는 원인 아님(systemic 기각). 코드(escape 1줄)는
+  런타임에 inert → segfault 유발 불가.
+- 운영 앱: 최초 hot update(main HEAD 갱신) 후 PID 221 segfault → 전체 Reboot 1회 후 fresh process
+  정상 기동(새 프로세스 2026-07-14 10:24 UTC, Uvicorn 정상), 10분 smoke PASS(검사 29회·연속 실패 0,
+  19:30~19:41 KST), 최신 Cloud 로그 segfault·traceback·재시작 없음.
+- working cause(확정 아님, 추정): **장시간 실행 프로세스가 GitHub hot update 후 불안정해져
+  Segmentation fault 발생**. fresh process에서는 재현되지 않음. 근본 원인 완전 확정은 아님.
+  (use_container_width deprecation 경고는 이번 장애 원인이 아니며 무관한 정보성 로그다.)
+- 폐기 후보: `stock-swing-basis-fix-stagin`(장애 인스턴스). 진단 종료 후 삭제 대상으로만 기록
+  (이번 작업에서는 삭제·Reboot하지 않음).
 
 ## UI/UX 2단계 (모바일 카드 밀도 개선) 운영 검증 (2026-07-14)
 - `86333df` merge: compact dashboard cards on mobile. feature/mobile-card-density-v2(`6aab986`)를
@@ -108,7 +146,8 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
 ## 알려진 문제 / 미push 변경
 - 거래대금 소스: pykrx/FDR이 거래대금 미제공 → data.go.kr 공공 API 전환 진행 중
   (API 키 발급 대기)
-- 미장 basis caption 렌더링 버그: 매매 카드의 `_basis_caption`(예 "본주 1,915.92 · ETF 28.06")에서
-  USD 표기 `$...$` 사이 텍스트가 Streamlit markdown LaTeX 수식으로 렌더됨(초록 이탤릭). 기존 이슈로
-  UI/UX 2단계 범위 밖 — 미수정. 별도 버그 작업 후보로 기록(아래 CURRENT_TASK 다음 단계 참조).
+- 미장 basis caption `$...$` 수식 렌더링 버그: **해결됨(`cd7f16c`, 2026-07-14)** — `_basis_caption`
+  반환에 `$`→`\$` escape 적용. 위 "USD basis caption 버그 수정 운영 검증" 참조.
+- (참고) 스테이징 인스턴스 Segmentation fault 사건: working cause "장시간 실행 프로세스가 hot update
+  후 불안정 → segfault"(추정). fresh process·Reboot로 복구. 위 사건·복구 섹션 참조. 근본 원인 미확정.
 - 미push 로컬 변경: 문서 마감분(PROJECT_STATE.md·CURRENT_TASK.md) — commit·push 대기 중.
