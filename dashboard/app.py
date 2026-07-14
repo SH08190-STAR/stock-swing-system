@@ -367,8 +367,29 @@ _LOGO_DOMAINS = {
     "012450": "hanwhaaerospace.com",   # 한화에어로스페이스
 }
 
-_BADGE_PALETTE = ["#4F46E5", "#0EA5E9", "#10B981", "#F59E0B",
-                  "#EF4444", "#8B5CF6", "#EC4899", "#14B8A6"]
+# ── 디자인 색상 토큰 (UI/UX 3B) ─────────────────────────────
+# app.py 내부 인라인 색상(카드 헤더·상태/시장/유형 뱃지·로고 fallback)을 의미 기반
+# 상수로 통일한다. 적용 범위: 카드/뱃지 인라인 style 문자열 전용.
+# 이 단계에서 다루지 않음(무변경): 전역 배경·사이드바·입력창 테마(Streamlit 기본 라이트),
+# 상승/하락·손익 색, config.toml, 전역 CSS. 각 뱃지는 텍스트 라벨을 유지하며
+# 색은 라벨을 보조할 뿐 색만으로 상태를 구분하지 않는다.
+_C_TEXT_MUTED = "#6B7280"    # 보조 텍스트(국가·시장 라인·'매매 기록' 라벨)
+_C_TEXT_FAINT = "#9CA3AF"    # 최약 보조 텍스트(종목코드·기록 날짜)
+_C_ON_ACCENT = "#FFFFFF"     # 색 배경 위 글자(로고 fallback 이니셜)
+_C_LOGO_BG = "#FFFFFF"       # 로고 이미지 프레임 배경
+_C_LOGO_BORDER = "#E5E7EB"   # 로고 이미지 프레임 테두리
+
+# 뱃지 팔레트 (배경, 글자) — 상태/시장/유형 뱃지가 공유하는 단일 체계.
+_BADGE_NEUTRAL = ("#F1F5F9", "#475569")   # 대기·시장(국장/미장)·본주
+_BADGE_BLUE = ("#DBEAFE", "#1D4ED8")      # 진입
+_BADGE_AMBER = ("#FEF3C7", "#92400E")     # TP IN
+_BADGE_GREEN = ("#DCFCE7", "#166534")     # 완료
+_BADGE_VIOLET = ("#F5F3FF", "#6D28D9")    # 2× 레버리지
+_BADGE_SECTOR = ("#EEF2FF", "#4338CA")    # 섹터 태그(카드 헤더)
+
+# 로고 fallback 이니셜 배경 — 기존 8색 난립을 안정적 4색으로 축소.
+# 상승/하락(빨강/파랑)·손익(초록) 의미색과 혼동되지 않도록 중립 계열로 구성.
+_LOGO_FALLBACK_COLORS = ["#475569", "#4F46E5", "#0D9488", "#B45309"]
 
 
 def get_logo_url(symbol: str, name: str | None = None, market: str | None = None) -> str | None:
@@ -382,7 +403,7 @@ def get_logo_url(symbol: str, name: str | None = None, market: str | None = None
 
 def _badge_color(key: str) -> str:
     s = str(key or "?")
-    return _BADGE_PALETTE[sum(ord(c) for c in s) % len(_BADGE_PALETTE)]
+    return _LOGO_FALLBACK_COLORS[sum(ord(c) for c in s) % len(_LOGO_FALLBACK_COLORS)]
 
 
 def _card_header_html(code: str, name: str, country: str, market: str, sector: str) -> str:
@@ -392,21 +413,21 @@ def _card_header_html(code: str, name: str, country: str, market: str, sector: s
     if url:
         logo = (f"<img src='{e(url)}' alt='' "
                 "style='width:34px;height:34px;border-radius:8px;object-fit:contain;"
-                "background:#fff;border:1px solid #e5e7eb;flex:none;'>")
+                f"background:{_C_LOGO_BG};border:1px solid {_C_LOGO_BORDER};flex:none;'>")
     else:
         ch = e((name or code or "?")[:1])
         logo = (f"<div style='width:34px;height:34px;border-radius:8px;background:{_badge_color(code or name)};"
-                "color:#fff;display:flex;align-items:center;justify-content:center;"
+                f"color:{_C_ON_ACCENT};display:flex;align-items:center;justify-content:center;"
                 "font-weight:600;font-size:15px;flex:none;'>" + ch + "</div>")
     return (
         "<div style='display:flex;align-items:center;gap:10px;'>"
         + logo
         + "<div style='flex:1;min-width:0;'>"
         + f"<div style='font-size:16px;font-weight:600;line-height:1.2;'>{e(name)} "
-        + f"<span style='color:#9ca3af;font-weight:400;font-size:13px;'>{e(code)}</span></div>"
-        + f"<div style='font-size:12px;color:#6b7280;'>{e(country)} · {e(market)}</div>"
+        + f"<span style='color:{_C_TEXT_FAINT};font-weight:400;font-size:13px;'>{e(code)}</span></div>"
+        + f"<div style='font-size:12px;color:{_C_TEXT_MUTED};'>{e(country)} · {e(market)}</div>"
         + "</div>"
-        + f"<span style='background:#eef2ff;color:#4338ca;padding:3px 10px;border-radius:12px;"
+        + f"<span style='background:{_BADGE_SECTOR[0]};color:{_BADGE_SECTOR[1]};padding:3px 10px;border-radius:12px;"
         + f"font-size:12px;white-space:nowrap;flex:none;'>{e(sector)}</span>"
         + "</div>"
     )
@@ -447,7 +468,7 @@ def render_stock_card(row: dict, keyns: str = "map"):
         # waiting/entered/tp_in 기록을 최대 3줄 표시. completed 제외.
         link_lines = trade_link_lines(row, currency)
         if link_lines:
-            right.markdown("<div style='font-size:12px;color:#6b7280;'>📌 매매 기록</div>",
+            right.markdown(f"<div style='font-size:12px;color:{_C_TEXT_MUTED};'>📌 매매 기록</div>",
                            unsafe_allow_html=True)
             for ln in link_lines:
                 right.caption(ln)
@@ -988,9 +1009,11 @@ def _trade_calc(r: dict):
     return out
 
 
+# 상태코드 → 뱃지색(대기 중립 / 진입 파랑 / TP IN 앰버 / 완료 초록).
+# 상태 라벨 텍스트(_ST_LABEL)와 병행하며 색만으로 상태를 구분하지 않는다.
 _BADGE_STYLES = {
-    "waiting": ("#E5E7EB", "#374151"), "entered": ("#DBEAFE", "#1D4ED8"),
-    "tp_in": ("#FEF3C7", "#92400E"), "completed": ("#DCFCE7", "#166534"),
+    "waiting": _BADGE_NEUTRAL, "entered": _BADGE_BLUE,
+    "tp_in": _BADGE_AMBER, "completed": _BADGE_GREEN,
 }
 
 
@@ -1004,20 +1027,20 @@ def _render_trade_card(r: dict, currency: str):
     모바일 가로 스크롤 최소화 목적(표 대신 카드)."""
     c = _trade_calc(r)
     status = r.get("status")
-    bg, fg = _BADGE_STYLES.get(status, ("#E5E7EB", "#374151"))
+    bg, fg = _BADGE_STYLES.get(status, _BADGE_NEUTRAL)
     lev_sym = str(r.get("leverage_symbol") or "").strip()
     badges = (
         _badge(_ST_LABEL.get(status, status), bg, fg)
-        + _badge("국장" if r.get("market_group") == "KR" else "미장", "#F1F5F9", "#475569")
-        + (_badge(f"2× {lev_sym}", "#F5F3FF", "#6D28D9") if lev_sym
-           else _badge("본주", "#F1F5F9", "#475569"))
+        + _badge("국장" if r.get("market_group") == "KR" else "미장", *_BADGE_NEUTRAL)
+        + (_badge(f"2× {lev_sym}", *_BADGE_VIOLET) if lev_sym
+           else _badge("본주", *_BADGE_NEUTRAL))
     )
     # key → 'st-key-trade_card_*' CSS 클래스 — 모바일 카드 밀도 CSS의 적용 범위 한정용
     with st.container(border=True, key=f"trade_card_{r.get('id')}"):
         st.markdown(
             f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
             f"<span style='font-size:17px;font-weight:600;'>{html.escape(str(r.get('symbol') or ''))}</span>"
-            f"<span style='color:#9ca3af;font-size:12px;'>{html.escape(str(r.get('record_date') or ''))}</span>"
+            f"<span style='color:{_C_TEXT_FAINT};font-size:12px;'>{html.escape(str(r.get('record_date') or ''))}</span>"
             f"<span>{badges}</span></div>",
             unsafe_allow_html=True)
         m1, m2, m3 = st.columns(3)

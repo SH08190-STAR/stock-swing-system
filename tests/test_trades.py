@@ -352,3 +352,48 @@ def test_basis_caption_krw_unchanged():
 def test_basis_caption_none_without_provider():
     m = _dash()
     assert m._basis_caption({"provider": None}, "USD") is None
+
+
+# ── 색상 토큰·뱃지 매핑 회귀 (UI/UX 3B) ─────────────────────
+# 색상 문자열과 매핑만 검증한다. HTML DOM·픽셀·Streamlit 내부 구조에 의존하지 않는다.
+def test_badge_status_palette_mapping():
+    """상태 → 뱃지 팔레트: 대기=중립 / 진입=파랑 / TP IN=앰버 / 완료=초록."""
+    m = _dash()
+    # 상태코드 → 의미 토큰(동일 객체) 매핑
+    assert m._BADGE_STYLES["waiting"] is m._BADGE_NEUTRAL
+    assert m._BADGE_STYLES["entered"] is m._BADGE_BLUE
+    assert m._BADGE_STYLES["tp_in"] is m._BADGE_AMBER
+    assert m._BADGE_STYLES["completed"] is m._BADGE_GREEN
+    # 각 토큰의 (배경, 글자) 색상 문자열 고정
+    assert m._BADGE_NEUTRAL == ("#F1F5F9", "#475569")   # 대기·시장·본주 공용 중립
+    assert m._BADGE_BLUE == ("#DBEAFE", "#1D4ED8")      # 진입
+    assert m._BADGE_AMBER == ("#FEF3C7", "#92400E")     # TP IN
+    assert m._BADGE_GREEN == ("#DCFCE7", "#166534")     # 완료
+
+
+def test_badge_market_type_and_leverage_mapping():
+    """시장(국장/미장)·본주=중립, 2× 레버리지=바이올렛."""
+    m = _dash()
+    # 국장/미장·본주 뱃지는 중립 토큰을 그대로 쓴다(색만으로 상태 구분하지 않음).
+    assert m._BADGE_NEUTRAL == ("#F1F5F9", "#475569")
+    # 2× 레버리지 뱃지는 바이올렛
+    assert m._BADGE_VIOLET == ("#F5F3FF", "#6D28D9")
+    # 섹터 태그(카드 헤더)는 별도 인디고 계열 — 상태 팔레트와 겹치지 않음
+    assert m._BADGE_SECTOR == ("#EEF2FF", "#4338CA")
+    # 상태색과 유형색이 서로 섞이지 않는지(중립≠파랑≠앰버≠초록≠바이올렛)
+    distinct = {m._BADGE_NEUTRAL, m._BADGE_BLUE, m._BADGE_AMBER,
+                m._BADGE_GREEN, m._BADGE_VIOLET}
+    assert len(distinct) == 5
+
+
+def test_logo_fallback_palette_bounds():
+    """로고 fallback 색은 지정한 4색 밖으로 벗어나지 않는다."""
+    m = _dash()
+    expected = ["#475569", "#4F46E5", "#0D9488", "#B45309"]
+    assert m._LOGO_FALLBACK_COLORS == expected
+    assert len(m._LOGO_FALLBACK_COLORS) == 4
+    palette = set(m._LOGO_FALLBACK_COLORS)
+    # 다양한 키(코드·종목명·빈값·기호)에 대해 항상 팔레트 내 색만 반환
+    for key in ["005490", "NVDA", "삼성전자", "", None, "?", "A", "zzz",
+                "123456", "파두", "TQQQ", "가나다라"]:
+        assert m._badge_color(key) in palette
