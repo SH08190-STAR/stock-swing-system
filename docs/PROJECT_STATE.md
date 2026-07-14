@@ -1,24 +1,23 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-15, commit 9bbd36d. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-15, commit 67ec9c9. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `9bbd36d` feat: unify dashboard color tokens and badges (2026-07-14 push)
-- UI/UX 3B: app.py 인라인 색상 토큰 상수화 + 상태/시장/유형 뱃지 팔레트 통일 +
-  로고 fallback 4색 축소. 운영 검증까지 완료돼 아래 LKG와 동일하다.
+- `67ec9c9` feat: refine dashboard header metrics and navigation (2026-07-15 push)
+- UI/UX 3C: 앱 헤더(Z PICK) + 요약 metric 밴드 + 상/하위 내비게이션 정돈. key 한정
+  st-key-* CSS(summary_band/top_nav/subnav)만 사용. 운영 검증까지 완료돼 아래 LKG와 동일하다.
 
 ## LAST_KNOWN_GOOD_COMMIT
-- `9bbd36d` feat: unify dashboard color tokens and badges (2026-07-15 갱신)
+- `67ec9c9` feat: refine dashboard header metrics and navigation (2026-07-15 갱신)
 - 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
-- 근거: UI/UX 3B — dashboard/app.py 인라인 색상만 토큰화(_C_*·_BADGE_*·
-  _LOGO_FALLBACK_COLORS), config.toml/전역 CSS 없음. 계산·DB·내비게이션·모바일 카드
-  CSS 무변경, requirements/schema/CSV/workflow 무변경. GitHub Tests·Deploy Smoke Check
-  성공 + 운영 앱 실화면 정상(사용자 확인, 2026-07-15) — 3B 운영 검증 완료.
-- 이전 LKG `cd7f16c`(USD basis caption fix)에서 갱신: 갱신 조건(배포 + smoke 통과 +
-  운영 실화면 확인) 충족.
+- 근거: UI/UX 3C — dashboard/app.py에 key 한정(st-key-*) CSS만 추가(_HEADER_NAV_CSS,
+  _C_SURFACE/_C_BORDER 토큰), config.toml/전역 CSS 없음. 계산·DB·내비게이션·3B 뱃지·
+  모바일 카드 CSS(_MOBILE_CARD_CSS) 무변경, requirements/schema/CSV/workflow 무변경.
+  GitHub Tests·Deploy Smoke Check 성공 + 운영 앱 실화면 정상(사용자 확인, 2026-07-15) — 3C 운영 검증 완료.
+- 이전 LKG `9bbd36d`(3B)에서 갱신: 갱신 조건(배포 + smoke 통과 + 운영 실화면 확인) 충족.
 - 참고: `a2e9a0e`는 "상태 스냅샷 작성 기준 커밋"으로 LKG와 별개다.
 - 갱신 규칙: 배포 후 smoke check + 안정 확인 + 운영 실화면 확인 시에만 갱신
 
@@ -26,10 +25,11 @@
 - 3A(전역 config.toml 라이트 테마): **폐기** — 스테이징 Segmentation fault 재현.
   .streamlit/config.toml 사용 금지 유지.
 - 3B(색상 토큰·뱃지 팔레트 통일): **운영 검증 완료** (`9bbd36d`, 2026-07-15).
-- 3C(앱 헤더·요약 밴드·내비게이션 정돈): **진행 중** — feature/ui-header-nav-v3c
-  (기준 main=9bbd36d). key 한정 st-key-* CSS만 사용, commit·push 전.
+- 3C(앱 헤더·요약 밴드·내비게이션 정돈): **운영 검증 완료** (`67ec9c9`, 2026-07-15).
+- 3D(카드 정보 위계·경고·손익 표현): **진행 중** — feature/ui-card-hierarchy-v3d
+  (기준 main=67ec9c9). 카드 표면 정돈 + 상승/하락·손익 시맨틱색(한국 관례 빨강+/파랑−) +
+  ETF 불일치 앰버 경고 영역. key 한정 st-key-* CSS만 사용, commit·push 전.
   상세는 docs/CURRENT_TASK.md.
-- 3D(상승·하락·손익 색, 카드 정보 위계): 미착수.
 
 ## deploy-smoke 실전 검증 이력
 - 2026-07-13: deploy-smoke workflow **최초 실전 검증 성공** (commit f40ba07,
@@ -158,5 +158,5 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
   반환에 `$`→`\$` escape 적용. 위 "USD basis caption 버그 수정 운영 검증" 참조.
 - (참고) 스테이징 인스턴스 Segmentation fault 사건: working cause "장시간 실행 프로세스가 hot update
   후 불안정 → segfault"(추정). fresh process·Reboot로 복구. 위 사건·복구 섹션 참조. 근본 원인 미확정.
-- 미push 로컬 변경: UI/UX 3C 작업분(feature/ui-header-nav-v3c — dashboard/app.py·
-  docs 2건) — 검증 후 commit·push 승인 대기.
+- 미push 로컬 변경: UI/UX 3D 작업분(feature/ui-card-hierarchy-v3d — dashboard/app.py·
+  tests/test_trades.py·docs 2건) — 로컬 검증 완료, commit·push 승인 대기.

@@ -397,3 +397,48 @@ def test_logo_fallback_palette_bounds():
     for key in ["005490", "NVDA", "삼성전자", "", None, "?", "A", "zzz",
                 "123456", "파두", "TQQQ", "가나다라"]:
         assert m._badge_color(key) in palette
+
+
+# ── 상승·하락·손익 표현 헬퍼 회귀 (UI/UX 3D) ────────────────
+# 순수 표현 함수의 텍스트·부호·색 분류만 검증한다(HTML DOM·CSS 문자열에 의존하지 않음).
+def test_signed_pct_text_sign_and_neutral():
+    """양수는 '+', 음수는 '-'(중복 없음), 0은 부호 없는 중립, 없음/이상은 None."""
+    m = _dash()
+    assert m.signed_pct_text(4.0) == "+4.0%"
+    assert m.signed_pct_text(-11.2) == "-11.2%"     # '--' 중복 없음
+    assert m.signed_pct_text(0) == "0.0%"           # 0 → 부호 없음
+    assert m.signed_pct_text(5.04) == "+5.0%"       # 소수 1자리(기존 반올림 유지)
+    assert m.signed_pct_text(None) is None
+    assert m.signed_pct_text(float("nan")) is None
+
+
+def test_semantic_sign_color_korea_convention():
+    """한국 관례: 양수=빨강(_C_UP) · 음수=파랑(_C_DOWN) · 0/없음=중립(_C_TEXT_MUTED)."""
+    m = _dash()
+    assert m._C_UP == "#DC2626" and m._C_DOWN == "#2563EB"
+    assert m.semantic_sign_color(1.5) == m._C_UP
+    assert m.semantic_sign_color(-1.5) == m._C_DOWN
+    assert m.semantic_sign_color(0) == m._C_TEXT_MUTED
+    assert m.semantic_sign_color(None) == m._C_TEXT_MUTED
+    assert m.semantic_sign_color(float("nan")) == m._C_TEXT_MUTED
+
+
+def test_signed_amount_text_sign_and_format():
+    """실현 손익 금액: 부호 병행 + 천단위 구분. 정수는 소수 없이, 0은 중립, 없음은 '—'."""
+    m = _dash()
+    assert m.signed_amount_text(90000) == "+90,000"
+    assert m.signed_amount_text(-30000) == "-30,000"   # 음수 부호 중복 없음
+    assert m.signed_amount_text(90.5) == "+90.5"       # 소수 자릿수 보존
+    assert m.signed_amount_text(0) == "0"              # 0 → 부호 없음
+    assert m.signed_amount_text(None) == "—"
+    assert m.signed_amount_text(float("nan")) == "—"
+
+
+def test_pnl_sign_key_classification():
+    """손익 부호 분류 키: 양수 pos · 음수 neg · 0 flat · 없음/이상 na."""
+    m = _dash()
+    assert m._pnl_sign_key(5) == "pos"
+    assert m._pnl_sign_key(-5) == "neg"
+    assert m._pnl_sign_key(0) == "flat"
+    assert m._pnl_sign_key(None) == "na"
+    assert m._pnl_sign_key(float("nan")) == "na"

@@ -6,61 +6,74 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — UI/UX 3단계 3C: 앱 헤더 + 요약 밴드 + 내비게이션 정돈
-> 배경: 3B(색상 토큰·뱃지 팔레트) 운영 검증 완료(LKG=9bbd36d). 3A 전역
-> config.toml 테마는 폐기 유지 — 3C도 .streamlit/config.toml·전역 CSS 없이
-> **key 한정(st-key-*) CSS**만 사용한다.
+## 목표 — UI/UX 3단계 3D: 카드 정보 위계 · 경고 · 손익 표현
+> 배경: 3C(헤더·요약 밴드·내비게이션) 운영 검증 완료(LKG=67ec9c9). 3A 전역
+> config.toml 테마는 폐기 유지 — 3D도 .streamlit/config.toml·전역 CSS 없이
+> **key 한정(st-key-*) CSS**와 인라인 style만 사용한다.
 
-- 브랜치: feature/ui-header-nav-v3c (기준 main=9bbd36d)
+- 브랜치: feature/ui-card-hierarchy-v3d (기준 main=67ec9c9)
 - 내용:
-  1. 앱 헤더: 로그인 후 본문 최상단에 `app_header` container — 제목 "Z PICK" +
-     보조 설명 "투자 유니버스 · 매매 계획 대시보드". 세로 여백 최소·이모지/그라데이션 없음.
-  2. 요약 metric 밴드: 기존 metric 5개(값·라벨·순서·계산 유지)를 `summary_band`
-     container로 감싸고, 그 범위 안에서만 흰 표면·1px 테두리·radius 10px·절제된
-     padding·값/라벨 위계 CSS 적용. 모바일 압축용 max-width 640px 블록 포함.
-  3. 상위 내비게이션: 기존 `top_nav` radio 유지, key 범위 CSS로 본문 구분선 +
-     글자 굵기(600)·간격 정돈. radio 원형 유지(숨김 없음), pill 강제 없음.
-  4. 하위 내비게이션: 기존 `sector_subnav`/`more_subnav` key 범위만, 상위보다
-     한 단계 약한 위계(500/0.85rem). 필터·검색·시장·상태 radio 기능 무변경.
-  5. 색상 토큰: `_C_SURFACE`, `_C_BORDER` 2종만 추가(3B 토큰 체계 연장).
+  1. 카드 표면 정돈: 섹터 카드(`stock_card_*`)·매매 카드(`trade_card_*`) key 범위에만
+     흰 배경·1px `#E2E8F0` 테두리·radius 10px·절제된 그림자(`0 1px 2px rgba(15,23,42,.05)`).
+     기존 카드 구조·열·위젯·정보·모바일 압축은 무변경.
+  2. 상승/하락·손익 시맨틱색(한국 관례): 양수=빨강`#DC2626`+`+`, 음수=파랑`#2563EB`+`−`,
+     0·없음=중립(부호 없음). **실제 등락·이격·손익 값에만** 적용:
+     - 섹터 카드 52주 고점 대비 이격률(`_high_line_html`)
+     - 섹터 카드 매매 연동 "현재가 대비" 이격률(`_trade_line_html`)
+     - 매매 카드/상세 완료 **총 손익**(`_pnl_metric` — 부호별 container key로 metric 값 색)
+     목표가·진입가·손절가 숫자 자체는 색칠하지 않는다. 순수 표현 helper 추가
+     (`signed_pct_text`·`semantic_sign_color`·`signed_amount_text`·`_pnl_sign_key`) + 단위 테스트.
+  3. 경고 영역: ETF 가격 쌍 불일치 경고를 회색 caption → 카드 내부 앰버 영역
+     (배경 `#FEF3C7`·글자 `#92400E`·좌측 강조선 `#F59E0B`)으로. 문구 내용 무변경,
+     정상 카드에는 렌더하지 않음(`_warn_box`).
+  4. 보조 정보(basis·출처·기준일·환산·메모)는 보조 텍스트 위계 유지. USD basis `$` 평문
+     유지(`_basis_caption` 무변경) — KaTeX 재발 없음.
+  5. 색상 토큰: `_C_CARD_BORDER`·`_C_UP`·`_C_DOWN`·`_C_WARN_ACCENT` 추가(3B/3C 체계 연장).
+     앰버 배경/글자는 `_BADGE_AMBER` 재사용, 카드 배경은 `_C_SURFACE` 재사용.
 
-## 이번 단계 제한 (3C) — 무변경(보호)
-- 계산 로직·ETF quote-pair·수량 계산/반올림·FDR·DB·캐시·인증 gate·module reload guard.
-- 4개 내비게이션 구조·기존 widget key·섹터/매매 카드 구조·상태/시장/2× 뱃지 매핑·
-  로고 fallback 팔레트·모바일 카드 압축(_MOBILE_CARD_CSS)·use_container_width.
+## 이번 단계 제한 (3D) — 무변경(보호)
+- 계산 로직·ETF quote-pair·수량 계산/반올림·손절금액/필요자금·FDR·DB·캐시·인증 gate·
+  module reload guard. **반올림·수식·기준값·데이터 소스 변경 없음**(표시만 변경).
+- 4개 내비게이션 구조·기존 widget key·3B 뱃지 매핑·로고 fallback 팔레트·3C 헤더/metric/메뉴·
+  `_MOBILE_CARD_CSS`·`_HEADER_NAV_CSS`·use_container_width.
+- `format_52w_high_line`·`format_trade_line` 순수 함수 출력 무변경(test_dashboard.py 통과 유지) —
+  렌더 사이트에서만 색 span으로 치환.
 - requirements/schema/CSV/workflow 무변경. DB write 없음.
 - 금지 selector: :has·nth-child·first/last-child·DOM 순서 의존·전역 stMetric·전역 CSS.
 
-## 수정 허용 파일 (3C)
+## 수정 허용 파일 (3D)
 - dashboard/app.py
+- tests/test_trades.py (순수 표현 helper 단위 테스트만)
 - docs/PROJECT_STATE.md
 - docs/CURRENT_TASK.md
 
-## 검증 계획
-1. py_compile · 전체 pytest · git diff --check
-2. 로컬 health 200 + 최소 120초 연속 실행, 서버 로그 traceback/AttributeError 없음
-3. 모바일 390px / 데스크톱 1440px 실화면: 로그인 후 첫 화면·홈·섹터·매매·더보기·
-   metric 5개·상하위 메뉴·사이드바·검색/필터/폼·섹터 카드·본주/레버리지 매매 카드·dataframe
-4. 확인 항목: 제목/설명 과대 없음·모바일 첫 화면 길이 유지·metric 누락 없음·
-   메뉴 rerun 상태 유지·상하위 위계 구분·카드 높이 무변화·가로 스크롤/겹침/잘림 없음·
-   달러 basis 평문·기존 뱃지 색 유지
+## 카드 container key · CSS selector 전체 목록
+- 기존 유지: `stock_card_*`, `trade_card_*`, `summary_band`, `top_nav`,
+  `sector_subnav`, `more_subnav`, `app_header`.
+- 신규(3D): `tr_pnl{pos|neg|flat}_{card|detail}_{id}` — 완료 총 손익 metric 부호별 색.
+- 신규 CSS(`_CARD_V3D_CSS`, main()에서 1회 주입):
+  - `[class*="st-key-stock_card_"], [class*="st-key-trade_card_"]` → 카드 표면(bg/border/radius/shadow)
+  - `[class*="st-key-tr_pnlpos_"] [data-testid="stMetricValue"]` → `#DC2626`
+  - `[class*="st-key-tr_pnlneg_"] [data-testid="stMetricValue"]` → `#2563EB`
+  - `[class*="st-key-tr_pnlflat_"] [data-testid="stMetricValue"]` → 중립
+- 경고 영역은 selector 미의존(인라인 style HTML `_warn_box`).
 
 ## 검증 결과 (로컬, 2026-07-15)
-- py_compile OK, git diff --check OK, 전체 pytest **181 passed**(.tmp/pytest.log).
-- 로컬 서버 health 200, 16분+ 연속 실행(>120초), 서버 로그 traceback·AttributeError 없음.
-- 데스크톱 1440: 헤더(제목 20.8px/700·보조 13px 중립색, h1 없음, 높이 ~40px),
-  summary_band metric 5개 흰 표면·1px #E5E7EB·radius 10px·padding 8.8/12.8px,
-  값·라벨·순서 유지(62/34/0/92/2026-07-14). top_nav 하단 1px 구분선·15.2px/600,
-  radio 원형 유지. 하위 subnav 13.6px/500(위계 구분). 홈/섹터/매매/더보기·사이드바
-  필터·통합 검색(종목 1·매매기록 1)·dataframe 정상, 예외 0.
-- 매매: 국장 11건·미장 카드 정상, 뱃지 실측 대기 #F1F5F9·2× #F5F3FF/#6D28D9 유지,
-  USD basis "본주 $1,673.97 · ETF $21.00" 평문(KaTeX 0). 가격 새로고침 rerun 후
-  매매/미장/대기중 선택 유지.
-- 모바일 390: metric 5개 세로 스택·겹침/잘림/가로 스크롤 없음, 밴드 압축(값 20px·
-  padding 6.4/10.4px). 섹터 카드 207px·metric 21.6px·padding 9.6/12px,
-  매매 카드 624px — 3B 기준선과 동일(모바일 카드 압축 무변화).
-- 참고: 로컬 APP_PASSWORD 미설정으로 gate 화면은 미표시(코드 무변경). 브라우저
-  자동화의 스크린샷 캡처 기능 장애로 화면 검증은 computed style·geometry 실측으로 수행.
+- py_compile OK, git diff --check OK, 전체 pytest **185 passed**(.tmp/pytest.log, 181+신규 4).
+- 로컬 서버 health 200, 약 10분 연속 실행(>120초), 서버 오류·traceback 없음, 콘솔 오류 없음.
+- 데스크톱 1440 실측(computed style·geometry — 스크린샷 캡처 장애로 대체 검증):
+  - 카드 표면 62개(섹터)·매매 카드: bg `#FFFFFF`·border `1px #E2E8F0`·radius 10px·
+    shadow `rgba(15,23,42,.05) 0 1px 2px`.
+  - 섹터 52주 고점 대비 -51.0% → 파랑(37,99,235). 매매 연동 "현재가 대비" 이격률 색 적용.
+  - 미장 완료 TEM 총 손익 양수 → 빨강(220,38,38, `tr_pnlpos`), 국장 완료 005930 총 손익
+    "-146,123" → 파랑(37,99,235, `tr_pnlneg`) — 카드·상세 양쪽 슬롯 동일. 부호 중복 없음.
+  - USD basis "본주 $58.23 · ETF $24.40" 평문(KaTeX 0). 2× 뱃지 바이올렛(245,243,255/109,40,217)
+    23종 유지, 상태/시장/본주 뱃지 중립(#F1F5F9/#475569) 유지.
+  - 정상(가격 쌍 일치) 카드에 경고 박스 없음(빈 영역 미렌더).
+- 모바일 390 실측: 섹터 카드 207px·매매 레버리지 587px(3C 기준선과 일치), metric 21.6px(1.35rem)·
+  padding 0.6/0.75rem, 완료 카드 pnl 래퍼도 모바일 압축 적용. 가로 스크롤·겹침·잘림 없음.
+- 참고: 로컬 APP_PASSWORD 미설정으로 gate 화면 미표시(코드 무변경). ETF 가격 쌍 불일치
+  경고는 현재 DB 데이터에 해당 레코드가 없어 라이브 미노출 — 코드 경로·문구는 보존.
 
 ## DB write 허용 여부
 아니오 (읽기 전용 — DB write 없음)
