@@ -108,6 +108,54 @@ if not _MODULE_STATUS["recovered"]:
     st.stop()
 
 
+# ── 모바일 카드 밀도 CSS (UI/UX 2단계) ──────────────────────
+# 적용 범위: st.container(key="stock_card_*") / st.container(key="trade_card_*")로
+# 감싼 섹터 종목 카드·매매 기록 카드 내부만. Streamlit 1.58.0은 container key를
+# 컨테이너 노드의 'st-key-{key}' CSS 클래스로 부여한다(로컬 DOM 확인: padding·gap이
+# 이 노드에 직접 존재). [class*=...] 속성 선택자만 사용 — :has·nth-child·전역
+# stMetric 선택자 없음. @media (max-width: 640px) 안에만 두어 데스크톱 무영향.
+# 상단 요약 metric·사이드바·검색·입력 폼은 카드 key 밖이므로 적용되지 않는다.
+_MOBILE_CARD_CSS = """<style>
+@media (max-width: 640px) {
+  /* 카드 컨테이너 자체 padding·세로 gap 축소 */
+  [class*="st-key-stock_card_"], [class*="st-key-trade_card_"] {
+    padding: 0.6rem 0.75rem;
+    gap: 0.4rem;
+  }
+  /* 카드 내부 중첩 블록(columns 세로 스택 등) 간격 축소 */
+  [class*="st-key-stock_card_"] [data-testid="stVerticalBlock"],
+  [class*="st-key-trade_card_"] [data-testid="stVerticalBlock"] {
+    gap: 0.4rem;
+  }
+  [class*="st-key-stock_card_"] [data-testid="stHorizontalBlock"],
+  [class*="st-key-trade_card_"] [data-testid="stHorizontalBlock"] {
+    gap: 0.5rem;
+  }
+  /* metric 값·라벨 크기 축소 (가독성 하한 유지, 카드 내부 한정) */
+  [class*="st-key-stock_card_"] [data-testid="stMetricValue"],
+  [class*="st-key-trade_card_"] [data-testid="stMetricValue"] {
+    font-size: 1.35rem;
+  }
+  [class*="st-key-stock_card_"] [data-testid="stMetricLabel"],
+  [class*="st-key-stock_card_"] [data-testid="stMetricLabel"] p,
+  [class*="st-key-trade_card_"] [data-testid="stMetricLabel"],
+  [class*="st-key-trade_card_"] [data-testid="stMetricLabel"] p {
+    font-size: 0.75rem;
+  }
+  /* caption 줄 간격 축소 */
+  [class*="st-key-stock_card_"] [data-testid="stCaptionContainer"] p,
+  [class*="st-key-trade_card_"] [data-testid="stCaptionContainer"] p {
+    line-height: 1.3;
+  }
+  /* expander 헤더 여백 소폭 축소 (카드 내부 expander만) */
+  [class*="st-key-stock_card_"] [data-testid="stExpander"] summary,
+  [class*="st-key-trade_card_"] [data-testid="stExpander"] summary {
+    padding: 0.15rem 0.75rem;
+  }
+}
+</style>"""
+
+
 # ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
 def gate() -> bool:
     if not config.APP_PASSWORD:
@@ -376,7 +424,8 @@ def render_stock_card(row: dict, keyns: str = "map"):
     close = row.get("close")
     has_price = close is not None and not pd.isna(close)
 
-    with st.container(border=True):
+    # key → 'st-key-stock_card_*' CSS 클래스 — 모바일 카드 밀도 CSS의 적용 범위 한정용
+    with st.container(border=True, key=f"stock_card_{keyns}_{code}"):
         # 헤더: 로고/뱃지 + 종목명 + 국가/시장 + 현재섹터 뱃지
         st.markdown(_card_header_html(code, name, country, market, sector),
                     unsafe_allow_html=True)
@@ -960,7 +1009,8 @@ def _render_trade_card(r: dict, currency: str):
         + (_badge(f"2× {lev_sym}", "#F5F3FF", "#6D28D9") if lev_sym
            else _badge("본주", "#F1F5F9", "#475569"))
     )
-    with st.container(border=True):
+    # key → 'st-key-trade_card_*' CSS 클래스 — 모바일 카드 밀도 CSS의 적용 범위 한정용
+    with st.container(border=True, key=f"trade_card_{r.get('id')}"):
         st.markdown(
             f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
             f"<span style='font-size:17px;font-weight:600;'>{html.escape(str(r.get('symbol') or ''))}</span>"
@@ -1307,6 +1357,9 @@ def render_trade_tab():
 def main():
     if not gate():
         return
+
+    # 모바일 카드 밀도 CSS 1회 주입 (범위: stock_card_*/trade_card_* 컨테이너 내부만)
+    st.markdown(_MOBILE_CARD_CSS, unsafe_allow_html=True)
 
     stocks, history, last_update, last_date = load_data()
 
