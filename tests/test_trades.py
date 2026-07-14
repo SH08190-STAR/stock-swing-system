@@ -316,3 +316,39 @@ def test_get_latest_price_prices_fallback(monkeypatch):
 def test_get_latest_price_none(monkeypatch):
     _patch(monkeypatch, {"stocks": [], "prices": []})
     assert db.get_latest_price("ZZZZ") is None
+
+
+# ── basis caption: USD $...$ Markdown 수식 렌더링 방지 ───────
+def test_basis_caption_usd_lev_escapes_dollar():
+    """미장 레버리지: $가 2개라 escape 없으면 $...$ 구간이 수식으로 렌더됨."""
+    m = _dash()
+    c = {"provider": "Supabase", "as_of": "2026-07-10",
+         "base_now": 1915.92, "etf_now": 28.06, "is_lev": True}
+    s = m._basis_caption(c, "USD")
+    assert "\\$1,915.92" in s and "\\$28.06" in s
+    assert s.count("$") == s.count("\\$")          # unescaped $ 없음
+    assert "가격 출처 Supabase" in s and "기준일 2026-07-10" in s
+
+
+def test_basis_caption_usd_single_escapes_dollar():
+    """미장 본주 단독도 동일하게 escape(카드 간 일관 표시)."""
+    m = _dash()
+    c = {"provider": "Supabase", "as_of": "2026-07-10",
+         "base_now": 123.45, "is_lev": False}
+    s = m._basis_caption(c, "USD")
+    assert "\\$123.45" in s and s.count("$") == s.count("\\$")
+
+
+def test_basis_caption_krw_unchanged():
+    """국장 원화 표시는 기존 문자열 그대로($ 없음 → escape 무영향)."""
+    m = _dash()
+    c = {"provider": "Supabase", "as_of": "2026-07-10",
+         "base_now": 78000.0, "etf_now": 12340.0, "is_lev": True}
+    s = m._basis_caption(c, "KRW")
+    assert s == "가격 출처 Supabase · 기준일 2026-07-10 · 본주 78,000원 · ETF 12,340원"
+    assert "\\" not in s and "$" not in s
+
+
+def test_basis_caption_none_without_provider():
+    m = _dash()
+    assert m._basis_caption({"provider": None}, "USD") is None

@@ -792,14 +792,17 @@ def _fetch_external_quote(r: dict):
 
 
 def _basis_caption(c: dict, currency: str):
-    """가격 계산 근거 한 줄: 출처 · 기준일 · 본주 현재가 (· ETF 현재가)."""
+    """가격 계산 근거 한 줄: 출처 · 기준일 · 본주 현재가 (· ETF 현재가).
+    USD는 '$a … $b'처럼 $가 2개 이상이면 st.caption(Markdown)이 $...$ 구간을
+    LaTeX 수식으로 렌더하므로, 표시 직전에 $를 \\$로 escape한다
+    (출력 문자열 전용 — 숫자 포맷·계산·저장값은 변경하지 않음)."""
     if not c.get("provider"):
         return None
     parts = [f"가격 출처 {c['provider']}", f"기준일 {c.get('as_of') or '—'}",
              f"본주 {_fmtp(c.get('base_now'), currency)}"]
     if c.get("is_lev"):
         parts.append(f"ETF {_fmtp(c.get('etf_now'), currency)}")
-    return " · ".join(parts)
+    return " · ".join(parts).replace("$", "\\$")
 
 
 def _fmtp(v, currency):
