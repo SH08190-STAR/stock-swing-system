@@ -1,0 +1,10 @@
+# Streamlit 설정 — UI/UX 3단계 3A: 라이트 테마 기반
+# Streamlit 1.58.0 기준. 아래 5개 키만 사용(모두 설치 버전에서 유효 확인).
+# 이 단계에서는 테마 기반색만 지정하고, 앱 코드/카드 HTML/뱃지/상승·하락 색은
+# 다음 단계(3B~3D)에서 다룬다.
+[theme]
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#F8FAFC"
+secondaryBackgroundColor = "#F1F5F9"
+textColor = "#0F172A"
