@@ -4,43 +4,23 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-완료  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 완료 기록 (2026-07-14)
-- UI/UX 1단계 — 상위 내비게이션 9개 탭 → 4개 메뉴(홈·섹터·매매·더보기) 재편.
-- feature/ui-navigation-v2(`62724be`) → main `--no-ff` 병합 `43088fa`, push 완료.
-- tests #30·deploy-smoke #7 성공, **운영 앱 실화면 확인 완료**(사용자, 2026-07-14):
-  로그인·4개 메뉴 전환·기존 9개 기능·공통 metric/검색/사이드바 유지·매매 rerun 후 메뉴 유지·
-  본주/ETF 카드·기준일 2026-07-10·환산값 정상, 빨간 오류·AttributeError·모듈 동기화 실패 없음.
-- LAST_KNOWN_GOOD_COMMIT을 `43088fa`로 갱신(docs/PROJECT_STATE.md).
-- DB write 없음. prices 58,371(레버리지 40/40 실조회 재검증)·trade_records 64·stocks 188·stock_targets 2 불변.
+## 작업 (2026-07-14)
+UI/UX 2단계 — 모바일 카드 밀도 개선.
+섹터 종목 카드·매매 기록 카드의 모바일(≤640px) 세로 길이를 CSS만으로 압축.
+브랜치 feature/mobile-card-density-v2 (기준 main=18f13b5, LKG=43088fa).
 
-## 다음 단계 후보 (UI/UX)
-- 2단계: 모바일 카드 압축 (카드 정보 밀도·세로 길이 최적화)
-- 3단계: 색상·간격·시각 디자인 개선
-- 착수 시 유의: 카드·CSS·색상·간격은 이번 1단계에서 의도적으로 무변경 유지했음.
-  2·3단계는 별도 승인·별도 브랜치로 진행하고, 계산·quote-pair·DB 로직은 계속 무변경.
-
-## (이전 작업 기록) UI/UX 1단계 상세 — 참고용
-목표: 상위 내비게이션을 9개 탭에서 4개 상위 메뉴(홈·섹터·매매·더보기)로 재편.
-기능 삭제 없이 기존 9개 화면을 하위 메뉴로 재배치. (기준 main=ad7906e, 병합 후 LKG=43088fa)
-
-## 최종 메뉴 매핑
-- 홈: 오늘 신규 편입 / 오늘 분류 이탈
-- 섹터: 섹터 구성(기본) / 전체 종목 / 단기스윙
-- 매매: 기존 매매 기록 기능 전체 그대로(render_trade_tab)
-- 더보기: 거래대금 순위 / 변경 이력 / 확인 보류
-
-## 구현 방식 (2026-07-13)
-- `dashboard/app.py` main()에서 `st.tabs([...9...])`를 제거하고, key 지정
-  horizontal `st.radio("메뉴", key="top_nav")` 상위 라우터로 교체.
-- 섹터·더보기는 하위 `st.radio`(key="sector_subnav"/"more_subnav")로 화면 전환.
-- 기존 탭 본문(전체/단기스윙/섹터 구성/신규 편입/분류 이탈/거래대금 순위/변경 이력/
-  확인 보류/매매)은 **로직·문구·위젯 key·CSV 위치 변경 없이** 조건 분기 아래로 재배치만.
-- 상단 요약 metric 5개·데이터 기준일·마지막 최신화·통합 검색·사이드바 필터는
-  라우터 위에 그대로 두어 모든 메뉴 공통 노출.
-- top_nav를 radio로 유지 → 매매 화면 st.rerun() 후에도 매매 메뉴 유지(기존 st.tabs는
-  rerun 시 첫 탭 복귀 문제 있었음).
+## 구현 방식
+- Streamlit 1.58.0 `st.container(key=...)`가 컨테이너 노드에 `st-key-{key}` CSS
+  클래스를 부여함을 로컬 DOM으로 확인(padding 15px·gap 16px이 이 노드에 직접 존재).
+- 카드 컨테이너에 key 추가: `stock_card_{keyns}_{code}` / `trade_card_{record_id}`.
+- `_MOBILE_CARD_CSS` 상수를 main()에서(gate 통과 후) 1회 주입.
+  `@media (max-width: 640px)` + `[class*="st-key-stock_card_"]`/`[class*="st-key-trade_card_"]`
+  속성 선택자만 사용 — :has·nth-child·전역 stMetric 선택자 없음.
+- 압축 내용(카드 내부 한정): 컨테이너 padding 15px→0.6rem/0.75rem, 세로 gap 16px→0.4rem,
+  metric value 36px→1.35rem·label 14px→0.75rem, caption line-height 1.6→1.3,
+  카드 내 expander summary padding 4px→0.15rem.
 
 ## 수정 허용 파일
 - dashboard/app.py, docs/CURRENT_TASK.md
@@ -49,21 +29,26 @@
 - 계산 로직(_trade_calc·lev_convert·calc_position_qty·calc_total_pnl),
   ETF quote-pair(app/quotes.py·db_quote_pair·get_common_close_pair),
   FDR 조회, DB 로직, 캐시 함수, 로그인 gate, 모듈 reload guard,
-  CSS·카드 디자인·색상·간격, requirements/schema/CSV/workflow.
-- st.pills / :has / 복잡한 CSS selector 미사용.
+  4개 내비게이션 구조, 기존 함수명·시그니처·위젯 key,
+  색상·뱃지·로고·그림자, requirements/schema/CSV/workflow.
+- 상단 요약 metric 5개·사이드바·검색·입력 폼(새 기록/수정 expander 포함)은
+  카드 key 밖이라 CSS 미적용(로컬 DOM으로 확인).
+- st.pills / :has / 광범위 nth-child 미사용. metric 커스텀 HTML 재작성 없음.
 
 ## DB write 허용 여부
 아니오 (읽기 전용 — DB write 없음)
 
 ## push 허용 여부
-아니오 (로컬 검수 완료, 사용자 승인 대기)
+아니오 (commit·push 전 — 사용자 검수·승인 대기)
 
-## 검증 (2026-07-13)
+## 검증 (2026-07-14, 로컬 :8601)
 - [x] py_compile (dashboard/app.py)
 - [x] 전체 pytest 174 passed (.tmp/pytest.log)
-- [x] git diff --check 통과 (dashboard/app.py 단일, +100/-92, 전부 main() 라우팅 영역)
-- [x] 로컬 Streamlit(:8601) 실검수:
-      로그인 통과, 4개 상위 메뉴 전환, 홈(신규 편입·분류 이탈)·섹터(섹터 구성 카드·
-      전체·단기스윙)·매매(카드·환산가·기준일 2026-07-10·최신 가격 조회)·더보기(3화면)
-      모두 도달, 공통 metric·검색·사이드바 전 메뉴 유지, 매매 '가격 새로고침'
-      rerun(23:43→23:44) 후 매매 메뉴 유지, 콘솔·서버 traceback 없음.
+- [x] git diff --check 통과 (dashboard/app.py 단일, +55/-2)
+- [x] 모바일 390px 실측(접힌 카드 높이):
+      섹터(삼성SDS) 285→207px(-27%), 매매 본주(108490) 885→624px(-30%),
+      매매 레버리지(SNDK 2×SNXX) 822→587px(-29%). 가로 스크롤 없음(scrollWidth 390).
+- [x] 데스크톱 1440px: 섹터 247px·매매 SNDK 416px — 변경 전과 동일(px 단위 일치),
+      카드 padding 15px·gap 16px·metric 36px 유지. 상단 metric 36px·폼 expander padding 불변.
+- [x] 매매 상세 expander 정상(환산가·출처·기준일·진입계획 표), 콘솔·서버 오류 없음.
+- 참고: 상세 내 진입계획 st.dataframe 내부 요소는 자체 스크롤 영역(기존 동작, 변경 없음).
