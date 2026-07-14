@@ -6,54 +6,64 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — UI/UX 3단계 3B: 색상 토큰 상수화 + 뱃지 팔레트 통일
-> 배경: 3A(전역 config.toml 라이트 테마)는 스테이징에서 config만 차이 나는 상태로
-> Segmentation fault 재현 → **폐기**. feature/ui-theme-foundation-v3a는 미병합 보관.
-> 3B는 config.toml/전역 CSS 없이 **app.py 내부 인라인 색상만** 토큰화한다.
-> Streamlit 기본 라이트 테마 유지. 상승/하락·손익 색은 3D로 미룸.
+## 목표 — UI/UX 3단계 3C: 앱 헤더 + 요약 밴드 + 내비게이션 정돈
+> 배경: 3B(색상 토큰·뱃지 팔레트) 운영 검증 완료(LKG=9bbd36d). 3A 전역
+> config.toml 테마는 폐기 유지 — 3C도 .streamlit/config.toml·전역 CSS 없이
+> **key 한정(st-key-*) CSS**만 사용한다.
 
-- 브랜치: feature/ui-color-tokens-v3b (기준 main=ebe5d6d)
+- 브랜치: feature/ui-header-nav-v3c (기준 main=9bbd36d)
 - 내용:
-  1. app.py 상단에 디자인 색상 토큰 상수 블록 신설(_C_TEXT_*, _C_LOGO_*, _BADGE_* 6종, _LOGO_FALLBACK_COLORS).
-  2. 흩어져 있던 인라인 hex를 전부 이 토큰으로 치환(카드 헤더·매매 뱃지·로고 fallback).
-  3. 상태 뱃지 팔레트 통일: 대기=중립 / 진입=파랑 / TP IN=앰버 / 완료=초록(_BADGE_STYLES가 토큰 참조).
-  4. 시장(국장/미장)·본주=중립, 2× 레버리지=바이올렛으로 통일.
-  5. 로고 fallback 8색 난립 → 안정적 4색(_LOGO_FALLBACK_COLORS)로 축소.
-  6. 텍스트 라벨 전부 유지, 색만으로 상태 구분하지 않음.
+  1. 앱 헤더: 로그인 후 본문 최상단에 `app_header` container — 제목 "Z PICK" +
+     보조 설명 "투자 유니버스 · 매매 계획 대시보드". 세로 여백 최소·이모지/그라데이션 없음.
+  2. 요약 metric 밴드: 기존 metric 5개(값·라벨·순서·계산 유지)를 `summary_band`
+     container로 감싸고, 그 범위 안에서만 흰 표면·1px 테두리·radius 10px·절제된
+     padding·값/라벨 위계 CSS 적용. 모바일 압축용 max-width 640px 블록 포함.
+  3. 상위 내비게이션: 기존 `top_nav` radio 유지, key 범위 CSS로 본문 구분선 +
+     글자 굵기(600)·간격 정돈. radio 원형 유지(숨김 없음), pill 강제 없음.
+  4. 하위 내비게이션: 기존 `sector_subnav`/`more_subnav` key 범위만, 상위보다
+     한 단계 약한 위계(500/0.85rem). 필터·검색·시장·상태 radio 기능 무변경.
+  5. 색상 토큰: `_C_SURFACE`, `_C_BORDER` 2종만 추가(3B 토큰 체계 연장).
 
-## 이번 단계 제한 (3B) — 무변경
-- 전역 배경·사이드바·입력창 테마(Streamlit 기본 라이트), .streamlit/config.toml 생성 금지, 전역 CSS 금지.
-- 앱 헤더·요약 밴드·내비게이션 디자인(3C), 상승/하락·손익 색(3D), 이모지 정리, 카드 배경/테두리/그림자.
-- 계산·ETF quote-pair·수량 계산·FDR·DB·캐시·로그인 gate·reload guard·내비게이션·
-  모바일 카드 CSS(_MOBILE_CARD_CSS)·use_container_width·기존 함수명/시그니처/위젯 key.
+## 이번 단계 제한 (3C) — 무변경(보호)
+- 계산 로직·ETF quote-pair·수량 계산/반올림·FDR·DB·캐시·인증 gate·module reload guard.
+- 4개 내비게이션 구조·기존 widget key·섹터/매매 카드 구조·상태/시장/2× 뱃지 매핑·
+  로고 fallback 팔레트·모바일 카드 압축(_MOBILE_CARD_CSS)·use_container_width.
 - requirements/schema/CSV/workflow 무변경. DB write 없음.
+- 금지 selector: :has·nth-child·first/last-child·DOM 순서 의존·전역 stMetric·전역 CSS.
 
-## 수정 허용 파일 (3B)
+## 수정 허용 파일 (3C)
 - dashboard/app.py
-- tests/test_trades.py (색상 매핑 회귀 테스트 추가)
+- docs/PROJECT_STATE.md
 - docs/CURRENT_TASK.md
 
-## 추가 테스트 (색상 매핑 회귀, DOM/픽셀 미의존)
-- test_badge_status_palette_mapping: 대기=중립/진입=파랑/TP IN=앰버/완료=초록(_BADGE_STYLES 토큰 매핑 + 색상 문자열).
-- test_badge_market_type_and_leverage_mapping: 시장·본주=중립, 2×=바이올렛, 섹터=인디고, 5색 상호 구분.
-- test_logo_fallback_palette_bounds: _LOGO_FALLBACK_COLORS 4색 고정 + 다양한 키에 _badge_color 반환이 항상 팔레트 내.
+## 검증 계획
+1. py_compile · 전체 pytest · git diff --check
+2. 로컬 health 200 + 최소 120초 연속 실행, 서버 로그 traceback/AttributeError 없음
+3. 모바일 390px / 데스크톱 1440px 실화면: 로그인 후 첫 화면·홈·섹터·매매·더보기·
+   metric 5개·상하위 메뉴·사이드바·검색/필터/폼·섹터 카드·본주/레버리지 매매 카드·dataframe
+4. 확인 항목: 제목/설명 과대 없음·모바일 첫 화면 길이 유지·metric 누락 없음·
+   메뉴 rerun 상태 유지·상하위 위계 구분·카드 높이 무변화·가로 스크롤/겹침/잘림 없음·
+   달러 basis 평문·기존 뱃지 색 유지
 
-## 검증 결과 (로컬)
-- py_compile OK, git diff --check OK, 전체 pytest **181 passed**(178+3, .tmp/pytest.log).
-- 로컬 UI(데스크톱 1440 / 모바일 390, config 없음 → appBg 흰색 기본):
-  - 상태 뱃지 실측: 대기 #F1F5F9, 진입 #DBEAFE, TP IN #FEF3C7, 완료 #DCFCE7. 라벨 텍스트 정상.
-  - 시장 #F1F5F9, 본주 #F1F5F9, 2× 레버리지 #F5F3FF. 섹터 태그 #EEF2FF/#4338CA.
-  - 로고 fallback 4색만 사용(#475569/#4F46E5/#0D9488/#B45309), 이미지 로고 병행.
-  - 달러 basis 일반 텍스트 유지(KaTeX 0). 코드/날짜 보조색 #9CA3AF.
-  - 홈/섹터/매매/더보기 정상, 모바일 카드 압축 유지(섹터 카드 높이 207px·metric 21.6px·padding 9.6/12px),
-    가로 스크롤·예외·서버 traceback 없음.
-
-## 다음 단계 (미착수)
-- 3C: 앱 헤더 + 요약 밴드 + 내비게이션 정돈(전역 CSS 없이 key-한정 방식 재검토 — 3A segfault 교훈 반영).
-- 3D: 카드 정보 위계 + 경고 박스 + 상승·하락·손익 색(상승 빨강+`+` / 하락 파랑+`-`, 텍스트 병행).
+## 검증 결과 (로컬, 2026-07-15)
+- py_compile OK, git diff --check OK, 전체 pytest **181 passed**(.tmp/pytest.log).
+- 로컬 서버 health 200, 16분+ 연속 실행(>120초), 서버 로그 traceback·AttributeError 없음.
+- 데스크톱 1440: 헤더(제목 20.8px/700·보조 13px 중립색, h1 없음, 높이 ~40px),
+  summary_band metric 5개 흰 표면·1px #E5E7EB·radius 10px·padding 8.8/12.8px,
+  값·라벨·순서 유지(62/34/0/92/2026-07-14). top_nav 하단 1px 구분선·15.2px/600,
+  radio 원형 유지. 하위 subnav 13.6px/500(위계 구분). 홈/섹터/매매/더보기·사이드바
+  필터·통합 검색(종목 1·매매기록 1)·dataframe 정상, 예외 0.
+- 매매: 국장 11건·미장 카드 정상, 뱃지 실측 대기 #F1F5F9·2× #F5F3FF/#6D28D9 유지,
+  USD basis "본주 $1,673.97 · ETF $21.00" 평문(KaTeX 0). 가격 새로고침 rerun 후
+  매매/미장/대기중 선택 유지.
+- 모바일 390: metric 5개 세로 스택·겹침/잘림/가로 스크롤 없음, 밴드 압축(값 20px·
+  padding 6.4/10.4px). 섹터 카드 207px·metric 21.6px·padding 9.6/12px,
+  매매 카드 624px — 3B 기준선과 동일(모바일 카드 압축 무변화).
+- 참고: 로컬 APP_PASSWORD 미설정으로 gate 화면은 미표시(코드 무변경). 브라우저
+  자동화의 스크린샷 캡처 기능 장애로 화면 검증은 computed style·geometry 실측으로 수행.
 
 ## DB write 허용 여부
 아니오 (읽기 전용 — DB write 없음)
 
 ## push 허용 여부
-아니오 (사용자 승인 대기 — commit 전)
+아니오 (commit·push 금지 — 사용자 승인 대기)
