@@ -1,18 +1,20 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-15, commit 39b8c95. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-15, main=3997bb6. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `39b8c95` feat: improve card hierarchy and semantic feedback (2026-07-15 push)
-- UI/UX 3D: 카드 표면 정돈 + 상승/하락·손익 시맨틱색(한국 관례 빨강+/파랑−) +
-  ETF 불일치 앰버 경고 영역. key 한정 st-key-* CSS만 사용. 운영 검증 완료 — 아래 LKG와 동일.
+- `3997bb6` feat: add Toss API client foundation (2026-07-15)
+- app/toss.py(토큰 관리 + /api/v1/prices batch 순수 모듈) + tests/test_toss.py.
+  dashboard 미연결·credentials 미입력 — 운영 실행 경로 무영향.
+- staging/ui-v3 = `e25046e` fix: bypass Toss overlay when disabled (fix 1).
 
 ## LAST_KNOWN_GOOD_COMMIT
 - `39b8c95` feat: improve card hierarchy and semantic feedback (2026-07-15 갱신)
-- 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
+- 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.**
+  (main HEAD는 이후 3997bb6로 전진 — toss foundation은 운영 실행 경로 무영향.)
 - 근거: UI/UX 3D — dashboard/app.py 표시 계층만 변경(카드 표면 CSS·시맨틱색 helper·
   앰버 경고 영역), 계산·DB·내비게이션·모바일 카드 CSS 무변경,
   requirements/schema/CSV/workflow 무변경. GitHub Tests·Deploy Smoke Check 성공 +
@@ -40,14 +42,24 @@
   revert(59144b1) 후 동일 동작 정상 → **overlay commit과 crash 상관성 확인,
   원인 라인 미확정**. 0161184 전체 재배포·main 병합 금지.
   사건 로그: .tmp/incident_2026-07-15_1.log. staging/ui-v3=59144b1(revert).
-- **fix 1 진행 중**(commit·push 전): 브랜치 feature/toss-live-overlay-fix1
-  (기준 59144b1 + cherry-pick 0161184 + fix). credentials 미설정 시 Toss 경로
-  완전 우회 — 게이트 단일화(_maybe_apply_toss_overlay)·cache_resource None 저장
-  금지·app.toss lazy import(비활성 시 requests 미로드)·session_state 미생성·
-  _trade_calc 비활성 시 기존 DB 경로 그대로. tests/test_toss_overlay.py 38건,
-  전체 pytest 248 passed. 상세는 docs/CURRENT_TASK.md.
-- 운영 정책: 운영 앱만 credentials 상시 보유, 로컬·스테이징은 mock 테스트만.
-  토스는 클라이언트당 활성 토큰 1개(재발급 시 이전 토큰 무효) + 허용 IP 등록 필요.
+- **fix 1 — 비활성 스테이징 검증 성공**: feature/toss-live-overlay-fix1=`e25046e`
+  (기준 59144b1 + cherry-pick 0161184 + 비활성 경로 완전 우회). staging/ui-v3에
+  e25046e 배포 후 credentials 미설정 상태 검증 성공 — segfault 재현 없음.
+  전체 pytest 248 passed 기준 유지. main 병합은 미실행.
+- **직접 Toss 호출 방식 폐기(2026-07-15)**: Streamlit Community Cloud outbound
+  IP 수가 토스 허용 IP 한도(10개) 초과 → 운영에서 직접 호출 구조 사용 불가.
+  일부 IP만 등록하는 방식 금지. **Fly.io static-egress Relay 방식 채택**
+  (Tokyo nrt, shared-cpu-1x 256MB 1대 상시 실행, app-scoped static egress
+  IPv4 1개만 토스에 등록, Fly HTTPS endpoint 사용·별도 도메인 없음).
+- **Relay foundation 진행 중**(브랜치 feature/toss-relay-service, commit 전):
+  services/toss_relay/(FastAPI, TossClient 재사용) + tests/test_toss_relay.py
+  49건 + toss-relay-tests.yml. 공개 endpoint 2개(healthz·v1/prices)·Bearer
+  shared secret·오류 코드 매핑·secret 비노출. **아직 Fly 배포·egress IP 할당·
+  실 Toss 호출 전 단계다(코드·테스트·문서만 존재).** 상세: CURRENT_TASK.md·
+  services/toss_relay/README.md.
+- 운영 정책: Toss credentials는 향후 Relay(Fly secrets)에만 존재, Streamlit에는
+  TOSS_RELAY_URL/TOSS_RELAY_TOKEN만. 토스는 클라이언트당 활성 토큰 1개
+  (재발급 시 이전 토큰 무효) → Relay Machine 최대 1대·worker 1개.
   우선순위(_trade_calc 한곳): 수동 외부조회 → Toss → Supabase DB.
 
 ## deploy-smoke 실전 검증 이력
@@ -178,7 +190,9 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
 - (참고) 스테이징 인스턴스 Segmentation fault 사건: working cause "장시간 실행 프로세스가 hot update
   후 불안정 → segfault"(추정). fresh process·Reboot로 복구. 위 사건·복구 섹션 참조. 근본 원인 미확정.
 - staging segfault 사건(2026-07-15): 0161184 배포 상태에서 매매→미장→TP IN 재현,
-  revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1로 비활성 경로 우회 진행 중.
-- 미push 로컬 변경: Toss live overlay fix 1(feature/toss-live-overlay-fix1 —
-  0161184 cherry-pick + dashboard/app.py 게이트/lazy import 수정 + 테스트 38건
-  + docs 2건) — 로컬 검증 완료(248 passed), commit·push 승인 대기.
+  revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1(e25046e)로 비활성 경로
+  우회, 스테이징 검증 성공.
+- 미push 로컬 변경: Toss Relay foundation(feature/toss-relay-service —
+  services/toss_relay/ 신규 + tests/test_toss_relay.py 49건 + 신규 workflow
+  toss-relay-tests.yml + docs 2건) — 로컬 검증 완료(전체 297 passed),
+  commit·push 승인 대기. Fly 배포·실호출은 미실행.

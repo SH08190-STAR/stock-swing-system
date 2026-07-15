@@ -1,0 +1,16 @@
+# Toss Relay Docker build 전용 방어선 — build context에서 민감·불필요 파일 제외.
+# Dockerfile은 app/toss.py 등 필요한 파일만 명시적으로 COPY하므로 image에 secret이
+# 들어갈 수 없지만, build context로 secret·.git이 전송되는 것 자체를 막는다.
+# Streamlit Community Cloud 배포는 Docker를 쓰지 않아 이 파일의 영향을 받지 않는다.
+# 주의: app/ 와 services/ 는 COPY 대상이므로 여기서 제외하지 않는다.
+.git
+.gitignore
+.env
+.env.*
+**/.env
+.streamlit/
+**/secrets.toml
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.tmp/

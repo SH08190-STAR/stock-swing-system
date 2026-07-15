@@ -1,0 +1,91 @@
+# Toss Relay 전용 CI — 기존 tests.yml(Streamlit requirements)과 완전 분리.
+# 실제 secrets·외부 네트워크는 사용하지 않는다 (단위 테스트는 mock, health는 healthz만).
+name: toss-relay-tests
+on:
+  push:
+    paths:
+      - "services/toss_relay/**"
+      - "tests/test_toss_relay.py"
+      - "app/toss.py"
+      - ".dockerignore"
+      - ".github/workflows/toss-relay-tests.yml"
+  pull_request:
+    paths:
+      - "services/toss_relay/**"
+      - "tests/test_toss_relay.py"
+      - "app/toss.py"
+      - ".dockerignore"
+      - ".github/workflows/toss-relay-tests.yml"
+
+jobs:
+  relay-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install relay runtime + test deps
+        run: pip install -r services/toss_relay/requirements.txt pytest httpx
+      - name: Run relay unit tests (no real network)
+        run: pytest tests/test_toss_relay.py -q
+
+  docker-build-health:
+    runs-on: ubuntu-latest
+    # 가짜 값만 사용 (실제 GitHub secret 미사용). RELAY_SHARED_SECRET은 32자 이상.
+    env:
+      RELAY_SHARED_SECRET: CI_FAKE_RELAY_SHARED_SECRET_0123456789_ABCDEF
+      TOSS_CLIENT_ID: ci_fake_client_id
+      TOSS_CLIENT_SECRET: ci_fake_client_secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (build context = repository root)
+        run: docker build -f services/toss_relay/Dockerfile -t toss-relay:test .
+
+      - name: Run container (fake secrets, health check only)
+        run: |
+          docker run -d --name toss-relay-ci -p 8080:8080 \
+            -e RELAY_SHARED_SECRET="$RELAY_SHARED_SECRET" \
+            -e TOSS_CLIENT_ID="$TOSS_CLIENT_ID" \
+            -e TOSS_CLIENT_SECRET="$TOSS_CLIENT_SECRET" \
+            toss-relay:test
+
+      - name: GET /healthz returns 200 {"status":"ok"} (no Toss call)
+        run: |
+          ok=""
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' \
+              http://127.0.0.1:8080/healthz || true)
+            if [ "$code" = "200" ] && grep -q '{"status":"ok"}' /tmp/health.json; then
+              ok="1"; echo "healthz -> 200 {\"status\":\"ok\"}"; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "healthz did not return 200 {status:ok} in time"; exit 1
+          fi
+          # /v1/prices 는 호출하지 않는다 (가짜 credential로 실 Toss 네트워크 방지).
+
+      - name: Assert no secret value leaks into container logs
+        run: |
+          docker logs toss-relay-ci > /tmp/relay.log 2>&1 || true
+          if grep -qF "$RELAY_SHARED_SECRET" /tmp/relay.log \
+             || grep -qF "$TOSS_CLIENT_SECRET" /tmp/relay.log \
+             || grep -qF "$TOSS_CLIENT_ID" /tmp/relay.log; then
+            echo "FAIL: secret value found in container logs"; exit 1
+          fi
+          echo "OK: no fake secret value present in logs"
+
+      - name: Dump redacted logs on failure (no Authorization/secret)
+        if: failure()
+        run: |
+          docker logs toss-relay-ci 2>&1 | sed \
+            -e "s/${RELAY_SHARED_SECRET}/<redacted>/g" \
+            -e "s/${TOSS_CLIENT_SECRET}/<redacted>/g" \
+            -e "s/${TOSS_CLIENT_ID}/<redacted>/g" || true
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f toss-relay-ci || true
