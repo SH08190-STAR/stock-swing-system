@@ -29,15 +29,26 @@
 - 3D(카드 정보 위계·경고·손익 표현): **운영 검증 완료** (`39b8c95`, 2026-07-15).
 - **UI/UX 3단계(3B~3D) 전체 완료.** 3A(전역 config.toml)만 폐기 유지.
 
-## 진행 중 — 토스증권 Open API 실시간 가격 연동 (foundation)
+## 진행 중 — 토스증권 Open API 실시간 가격 연동
 - 목표: Toss Open API로 본주·레버리지 ETF 현재가를 화면 표시용 overlay로 반영
   (Supabase 최신 종가는 fallback·과거 데이터로 유지, DB 틱 저장 없음).
-- 1차 foundation: `app/toss.py`(토큰 관리 + `/api/v1/prices` batch 조회 순수 모듈) +
-  `tests/test_toss.py`(mock 25건, 실호출 0회). 브랜치 feature/toss-api-client-foundation.
-  **실호출·환경변수·대시보드·DB 연결 없음** — 2차에서 대시보드 연동 예정.
+- **1차 foundation 완료**(main=3997bb6): `app/toss.py`(토큰 관리 + `/api/v1/prices`
+  batch 조회 순수 모듈) + `tests/test_toss.py`(mock 25건). GitHub Tests success.
+- **2차 live overlay(0161184) — staging segfault 사건으로 수정 중**:
+  0161184를 staging/ui-v3에 배포 후 사용자 재현(로그인→매매→미장→TP IN)에서
+  Segmentation fault(traceback 없음, credentials 미설정·Toss 호출 0회 상태).
+  revert(59144b1) 후 동일 동작 정상 → **overlay commit과 crash 상관성 확인,
+  원인 라인 미확정**. 0161184 전체 재배포·main 병합 금지.
+  사건 로그: .tmp/incident_2026-07-15_1.log. staging/ui-v3=59144b1(revert).
+- **fix 1 진행 중**(commit·push 전): 브랜치 feature/toss-live-overlay-fix1
+  (기준 59144b1 + cherry-pick 0161184 + fix). credentials 미설정 시 Toss 경로
+  완전 우회 — 게이트 단일화(_maybe_apply_toss_overlay)·cache_resource None 저장
+  금지·app.toss lazy import(비활성 시 requests 미로드)·session_state 미생성·
+  _trade_calc 비활성 시 기존 DB 경로 그대로. tests/test_toss_overlay.py 38건,
+  전체 pytest 248 passed. 상세는 docs/CURRENT_TASK.md.
 - 운영 정책: 운영 앱만 credentials 상시 보유, 로컬·스테이징은 mock 테스트만.
   토스는 클라이언트당 활성 토큰 1개(재발급 시 이전 토큰 무효) + 허용 IP 등록 필요.
-  상세는 docs/CURRENT_TASK.md.
+  우선순위(_trade_calc 한곳): 수동 외부조회 → Toss → Supabase DB.
 
 ## deploy-smoke 실전 검증 이력
 - 2026-07-13: deploy-smoke workflow **최초 실전 검증 성공** (commit f40ba07,
@@ -166,5 +177,8 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
   반환에 `$`→`\$` escape 적용. 위 "USD basis caption 버그 수정 운영 검증" 참조.
 - (참고) 스테이징 인스턴스 Segmentation fault 사건: working cause "장시간 실행 프로세스가 hot update
   후 불안정 → segfault"(추정). fresh process·Reboot로 복구. 위 사건·복구 섹션 참조. 근본 원인 미확정.
-- 미push 로컬 변경: Toss API foundation(feature/toss-api-client-foundation —
-  app/toss.py·tests/test_toss.py 신규 + docs 2건) — 로컬 검증 완료, commit·push 승인 대기.
+- staging segfault 사건(2026-07-15): 0161184 배포 상태에서 매매→미장→TP IN 재현,
+  revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1로 비활성 경로 우회 진행 중.
+- 미push 로컬 변경: Toss live overlay fix 1(feature/toss-live-overlay-fix1 —
+  0161184 cherry-pick + dashboard/app.py 게이트/lazy import 수정 + 테스트 38건
+  + docs 2건) — 로컬 검증 완료(248 passed), commit·push 승인 대기.

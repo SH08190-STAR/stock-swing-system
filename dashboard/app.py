@@ -35,6 +35,7 @@ from app import config
 from app import database as db
 from app import quotes as qt
 from app import watchlist as wl
+from app import toss_overlay as tov   # 순수 모듈(quotes만 의존) — app.toss는 lazy import
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
 
@@ -963,13 +964,110 @@ def fdr_single_quote(symbol: str):
     return qt.fetch_fdr_snapshot(symbol)
 
 
+# ── Toss live overlay (app/toss.py + app/toss_overlay.py) ───────────────────
+# 우선순위(한곳에서 명확히): 1) 사용자가 버튼으로 조회한 수동 외부(FDR) 결과(_ext_quote)
+# → 2) Toss live overlay → 3) Supabase DB(공통일자 pair / 최신 quote) → 4) 기존 FDR.
+# 4)는 (1)의 수동 버튼 경로와 동일하다(렌더 기본 경로는 DB, 외부는 버튼일 때만).
+#
+# Fix 1 (staging segfault 격리 후): credentials 미설정이면 Toss 기능이 "존재하지 않는
+# 것처럼" 동작한다 — 게이트는 _maybe_apply_toss_overlay 한곳이며, 비활성 상태에서는
+# _toss_client/_toss_overlay_raw/심볼 수집/session_state 생성/app.toss import(→requests)
+# 를 일절 실행하지 않는다(3997bb6 실행 경로와 동일). cache_resource에 None을 저장하지
+# 않고, app.toss는 활성 경로에서만 lazy import한다.
+TOSS_MAX_SKEW_SEC = 300               # 본주·ETF 기준시각 허용 차이(5분)
+_TOSS_OVERLAY_KEY = "_toss_overlay"   # 현재 rerun의 {symbol: TossPrice} (session_state)
+
+
+def toss_enabled() -> bool:
+    """Toss live overlay 활성 여부 — credentials 둘 다 설정됐을 때만 True.
+    순수 문자열 검사만 한다(cache·client·import 접근 없음)."""
+    return tov.is_configured(config.TOSS_CLIENT_ID, config.TOSS_CLIENT_SECRET)
+
+
+@st.cache_resource
+def _toss_client():
+    """유효한 TossClient 1개를 만들어 프로세스 내 재사용한다(None을 캐시하지 않음).
+    반드시 toss_enabled() 게이트 뒤에서만 호출한다 — credentials 미설정 상태에서는
+    호출 자체가 없어야 하며, 만약 호출되면 TossClient 생성자가 TossAuthError를 던진다.
+    app.toss(→requests)는 여기서 처음 import한다(비활성 프로세스에 로드하지 않음)."""
+    from app.toss import TossClient            # lazy runtime import (활성 경로 전용)
+    return TossClient(config.TOSS_CLIENT_ID, config.TOSS_CLIENT_SECRET)
+
+
+def _fetch_toss_prices(client, symbols):
+    """client.get_prices 호출 + 모든 Toss 예외 격리. 반환 (prices_dict, error_name|None).
+    401 재발급은 toss.py 내부 1회 정책을 그대로 쓰고, 여기서 429 sleep·재시도는 하지 않는다.
+    어떤 오류도 앱으로 전파하지 않고 빈 dict로 돌려 전체 batch를 DB fallback시킨다.
+    예외 메시지에는 secret/token이 없고(toss.py 계약), 로그도 타입명만 남긴다."""
+    if client is None or not symbols:
+        return {}, None
+    from app import toss as toss_api            # lazy — 활성 경로 전용
+    try:
+        return client.get_prices(list(symbols)), None
+    except toss_api.TossApiError as e:          # Auth/Forbidden/RateLimit/Timeout/Response 포함
+        _log_quote_error_once("toss_overlay", e)
+        return {}, type(e).__name__
+    except Exception as e:                       # 예상 못한 오류도 앱 중단 방지
+        _log_quote_error_once("toss_overlay", e)
+        return {}, "TossUnexpected"
+
+
+@st.cache_data(ttl=20, show_spinner=False, max_entries=8)
+def _toss_overlay_raw(symbols_key: tuple):
+    """visible 심볼 batch를 Toss로 1회 조회(캐시 TTL 20초). 단순 widget rerun이 20초
+    이내면 이 캐시가 재사용돼 실제 API를 다시 호출하지 않는다. 반환 {prices, error}.
+    활성 경로 전용(_apply_toss_overlay에서만 호출)."""
+    prices, error = _fetch_toss_prices(_toss_client(), list(symbols_key))
+    return {"prices": prices, "error": error}
+
+
+def _toss_overlay_state() -> dict:
+    """현재 rerun의 Toss overlay(session_state). 비활성이면 key 자체가 없어 {} —
+    호출측은 빈 overlay일 때 Toss 분기를 타지 않고 기존 DB 경로로 간다."""
+    try:
+        return st.session_state.get(_TOSS_OVERLAY_KEY) or {}
+    except Exception:
+        return {}
+
+
+def _maybe_apply_toss_overlay(records) -> bool:
+    """Toss 게이트 단일 지점(render_trade_tab에서 호출). 비활성이면 False만 반환하고
+    session_state 생성·심볼 수집·cache 접근·client 생성·import 등 어떤 Toss 경로도
+    실행하지 않는다. 활성이면 _apply_toss_overlay 실행 후 True."""
+    if not toss_enabled():
+        return False
+    _apply_toss_overlay(records)
+    return True
+
+
+def _apply_toss_overlay(records):
+    """(활성 전용 — _maybe_apply_toss_overlay 게이트 뒤에서만 호출)
+    visible 매매기록의 본주·ETF 심볼을 Toss batch로 1회 조회해 session_state에 싣는다.
+    조회 실패 시 매매 영역에 작은 안내를 1회만 표시(카드별 반복 없음)."""
+    syms = tov.collect_visible_symbols(records, _resolve_symbol)
+    res = _toss_overlay_raw(tuple(syms))
+    st.session_state[_TOSS_OVERLAY_KEY] = res.get("prices") or {}
+    if res.get("error"):
+        st.info("토스 실시간 시세를 사용할 수 없어 기존 가격을 표시합니다.")
+
+
+def _toss_skew_caption(c: dict):
+    """Toss 레버리지 쌍일 때 본주·ETF 각각의 기준시각을 한 줄로 표시(가독성).
+    DB(Supabase) 쌍은 provider가 달라 렌더하지 않는다(중복 정보 방지)."""
+    if (c.get("provider") == tov.TOSS_PROVIDER and c.get("is_lev")
+            and c.get("base_as_of") and c.get("etf_as_of")):
+        st.caption(f"⏱ 토스 기준시각 · 본주 {c['base_as_of']} · ETF {c['etf_as_of']}")
+
+
 def clear_price_caches():
-    """가격 새로고침: 계산용 가격 캐시만 초기화(가격 쌍·외부 조회 포함). 다른 탭 무영향."""
+    """가격 새로고침: 계산용 가격 캐시만 초기화(가격 쌍·외부 조회·Toss batch 포함).
+    Toss client(=토큰 캐시)는 유지한다 — 토큰을 불필요하게 재발급하지 않는다. 다른 탭 무영향."""
     latest_price.clear()
     db_quote_pair.clear()
     db_single_quote.clear()
     fdr_quote_pair.clear()
     fdr_single_quote.clear()
+    _toss_overlay_raw.clear()         # Toss 가격 batch 캐시만 — 토큰(_toss_client)은 보존
 
 
 def _ext_quote(record_id):
@@ -1171,12 +1269,25 @@ def _trade_calc(r: dict):
     mg = r.get("market_group")
     lev_sym = str(r.get("leverage_symbol") or "").strip()
     ext = _ext_quote(r.get("id"))
+    base_s = _resolve_symbol(r.get("symbol"), mg)
+    base_as_of = etf_as_of = None
+    # 활성 Toss overlay가 있을 때만 Toss 분기를 탄다 — 비활성(빈 overlay)이면
+    # 기존 3997bb6과 동일한 _ext_quote → DB 경로만 실행(카드별 Toss helper 호출 0).
+    ov = _toss_overlay_state()
     if lev_sym:
-        pair = ext if isinstance(ext, qt.QuotePair) else db_quote_pair(
-            _resolve_symbol(r.get("symbol"), mg), _resolve_symbol(lev_sym, mg))
+        etf_s = _resolve_symbol(lev_sym, mg)
+        # 우선순위: 1) 수동 외부조회(_ext_quote) 보존 → 2) Toss 쌍 → 3) DB 공통일자 쌍
+        if isinstance(ext, qt.QuotePair):
+            pair = ext
+        elif ov:
+            pair = (tov.pick_pair(ov, base_s, etf_s, max_skew_sec=TOSS_MAX_SKEW_SEC)
+                    or db_quote_pair(base_s, etf_s))
+        else:
+            pair = db_quote_pair(base_s, etf_s)
         if pair is not None and pair.is_consistent:
             base_now, etf_now = pair.base.price, pair.leverage.price
             provider, as_of = pair.provider, pair.as_of
+            base_as_of, etf_as_of = pair.base.as_of, pair.leverage.as_of
             consistent, reason = True, ""
             conv = lambda t: lev_convert(etf_now, base_now, t)
         else:
@@ -1186,11 +1297,17 @@ def _trade_calc(r: dict):
             conv = lambda t: None     # 쌍 불일치·부재 — 환산 계산 보류
         trade_now = etf_now
     else:
-        snap = ext if isinstance(ext, qt.QuoteSnapshot) else db_single_quote(
-            _resolve_symbol(r.get("symbol"), mg))
+        # 우선순위: 1) 수동 외부조회 → 2) Toss 단독 → 3) DB 최신 quote
+        if isinstance(ext, qt.QuoteSnapshot):
+            snap = ext
+        elif ov:
+            snap = tov.pick_single(ov, base_s) or db_single_quote(base_s)
+        else:
+            snap = db_single_quote(base_s)
         base_now = snap.price if snap else None
         provider = snap.provider if snap else None
         as_of = snap.as_of if snap else None
+        base_as_of = as_of
         etf_now = None
         conv = _plain_target          # 본주 단독: 환산가 = 본주 목표가
         trade_now = base_now
@@ -1199,7 +1316,8 @@ def _trade_calc(r: dict):
     out = {"base_now": base_now, "etf_now": etf_now, "stop_lev": stop_lev,
            "conv": conv, "trade_now": trade_now, "is_lev": bool(lev_sym),
            "consistent": consistent, "reason": reason,
-           "provider": provider, "as_of": as_of}
+           "provider": provider, "as_of": as_of,
+           "base_as_of": base_as_of, "etf_as_of": etf_as_of}
     for i in (1, 2, 3, 4):
         e_lev = conv(r.get(f"entry{i}"))
         out[f"e{i}_lev"] = e_lev
@@ -1259,6 +1377,7 @@ def _render_trade_card(r: dict, currency: str):
         basis = _basis_caption(c, currency)
         if basis:
             st.caption(f"📊 {basis}")
+        _toss_skew_caption(c)         # Toss 쌍이면 본주·ETF 각 기준시각 표시
         if c["is_lev"] and not c["consistent"]:
             st.markdown(_warn_box("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
                                   + (f" ({c['reason']})" if c.get("reason") else "")),
@@ -1289,6 +1408,7 @@ def _render_trade_detail(r: dict, currency: str):
         basis = _basis_caption(c, currency)
         if basis:
             st.caption(f"📊 {basis}")
+        _toss_skew_caption(c)         # Toss 쌍이면 본주·ETF 각 기준시각 표시
         if c["is_lev"] and not c["consistent"]:
             st.markdown(_warn_box("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
                                   + (f" ({c['reason']})" if c.get("reason") else "")),
@@ -1434,6 +1554,11 @@ def render_trade_tab():
     if records and tr_searched:
         _nm = stock_name_map()
         records = [x for x in records if trade_matches_query(x, tq, _nm)]
+
+    # Toss live overlay — 화면에 보이는 기록의 본주·ETF 심볼만 1회 batch 조회(캐시 20초).
+    # credentials 미설정이면 게이트에서 즉시 통과(어떤 Toss 경로도 실행하지 않음).
+    # 실패 시 기존 DB 가격으로 조용히 fallback한다(카드별 반복 경고 없음).
+    _maybe_apply_toss_overlay(records or [])
 
     # 기록 카드 목록 (모바일 가독성 — 표 대신 카드 + 상세 expander)
     if records:
