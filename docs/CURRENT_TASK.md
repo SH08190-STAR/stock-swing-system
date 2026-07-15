@@ -6,79 +6,65 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — 토스증권 Open API 2차: 매매 화면 본주·ETF live overlay
-> 배경: Toss foundation 1차(app/toss.py) 완료(main=3997bb6). 이번엔 매매 화면에서
-> 본주·레버리지 ETF 현재가를 화면 표시용 live overlay로 반영한다. Supabase 최신
-> 종가는 안정적 fallback·과거 데이터로 유지하고, DB에는 아무것도 쓰지 않는다.
-> **이번 단계는 mock 기반 통합 + 로컬 검증까지만** — 실 credentials 입력·실호출·
-> commit·push는 별도 승인 전 금지.
+## 목표 — 토스증권 Open API client foundation (1차)
+> 배경: UI/UX 3단계(3B~3D) 운영 검증 완료, LKG=39b8c95. 토스 Open API로
+> 본주·레버리지 ETF 현재가를 화면 표시용 실시간 overlay로 반영하는 작업의
+> 1차 단계 — **순수 클라이언트 모듈 + mock 테스트만** 구현한다.
 
-- 브랜치: feature/toss-live-overlay (기준 main=3997bb6)
+- 브랜치: feature/toss-api-client-foundation (기준 main=39b8c95)
 - 내용:
-  1. `app/config.py` — 선택 설정 `TOSS_CLIENT_ID`/`TOSS_CLIENT_SECRET`(env). 둘 다
-     있을 때만 활성, 미설정은 정상(비활성). validate_for_collector·인증 gate 무영향.
-  2. `app/toss_overlay.py` 신규 — Streamlit·DB·네트워크 비의존 순수 로직.
-     `is_configured` / `collect_visible_symbols(records, resolve)` /
-     `pick_single(overlay, sym)` / `pick_pair(overlay, base, etf, max_skew_sec=300)`.
-     TossPrice→QuoteSnapshot 변환(Decimal·개별 timestamp 보존, provider="Toss").
-     레버리지 쌍은 본주·ETF 둘 다 Toss + 유효 + 기준시각 차이 ≤5분일 때만 consistent,
-     아니면 None(→DB 전체 fallback). 출처 혼합(본주 Toss+ETF DB) 원천 차단.
-  3. `dashboard/app.py`:
-     - `_toss_client()`(st.cache_resource — 프로세스당 client 1개, 토큰 내부 캐시,
-       rerun마다 재발급 안 함), `toss_enabled()`.
-     - `_fetch_toss_prices`(모든 Toss 예외 격리 → 빈 dict+타입명, 429 재시도 없음),
-       `_toss_overlay_raw`(st.cache_data TTL 20초 — 20초 내 rerun은 재조회 안 함).
-     - `_apply_toss_overlay(records)` — visible 기록 심볼만 1회 batch 조회 후
-       session_state에 overlay 적재. 실패 시 매매 영역 안내 1회
-       ("토스 실시간 시세를 사용할 수 없어 기존 가격을 표시합니다.").
-     - `_trade_calc` 우선순위(한곳): 1) 수동 외부조회(_ext_quote) → 2) Toss →
-       3) Supabase DB. 본주 단독도 동일(Toss→DB). base_as_of/etf_as_of 노출.
-     - `clear_price_caches`에 `_toss_overlay_raw.clear()` 추가(가격 캐시만, 토큰 유지).
-     - `_toss_skew_caption` — Toss 쌍일 때 본주·ETF 각 기준시각 표시.
-  4. `tests/test_toss_overlay.py` 신규 — FakeTossClient·monkeypatch만, 실호출 0회. 31건.
-
-## 우선순위 (코드 한곳 = _trade_calc)
-1. 사용자가 버튼으로 조회한 수동 외부(FDR) 결과(_ext_quote) — 보존, Toss가 덮지 않음
-2. Toss live overlay (provider="Toss")
-3. Supabase DB 공통일자 pair / 최신 quote
-4. 기존 FDR fallback (= 1의 수동 버튼 경로와 동일)
+  1. `app/toss.py` 신규 — Streamlit 비의존 순수 모듈.
+     - `TossClient(client_id, client_secret, session=, base_url=, now_fn=)`:
+       생성자 주입, requests.Session 주입 가능, timeout (connect 3s, read 5s).
+     - 인증: POST /oauth2/token (client_credentials, form-urlencoded).
+       access_token/token_type("Bearer")/expires_in 검증. 인스턴스 내부 토큰 캐시,
+       만료 5분 전 재발급, threading.Lock으로 중복 발급 방지(인스턴스당 토큰 1개).
+     - 가격: GET /api/v1/prices — 심볼 정규화(공백·빈값 제거, 대문자, 입력 순서
+       유지 중복 제거), 200개 단위 chunk, 반환 `dict[str, TossPrice]`
+       (`TossPrice`: symbol · last_price=Decimal · currency · timestamp=aware datetime,
+       종목별 timestamp 원본 보존 — batch라도 통일하지 않음).
+       200 응답에서 누락된 심볼은 반환 dict에 넣지 않는다.
+     - 오류: 첫 401 → 토큰 폐기 후 정확히 1회 재발급·재요청, 재차 401 →
+       TossAuthError. 403 → TossForbiddenError. 429 → TossRateLimitError
+       (retry_after 보존, 자동 sleep·재시도 없음). timeout → TossTimeoutError.
+       5xx → TossApiError. JSON·필드·가격·timestamp 이상 → TossResponseError.
+  2. `tests/test_toss.py` 신규 — mock Session만 사용, 실제 네트워크 호출 0회.
+     토큰 발급/재사용/만료 margin/401 처리/403/404/429/timeout/5xx/응답 이상/
+     batch·chunk·중복 제거·대문자화·Decimal·timestamp aware 보존/부분 누락/
+     secret 비노출/동시 발급 방지 — 25건.
+     경계조건: 전체 요청 404(부분 누락·재시도 없이 예외), naive timestamp 거부.
 
 ## 보안 정책 (절대)
-- 실 credentials/access token/Authorization 헤더를 코드·테스트·로그·문서에 넣지 않음.
-- Toss 예외 메시지는 고정 문구+상태코드만(toss.py 계약). 오류표식은 타입명만.
-- 운영 앱만 credentials 상시 보유. 로컬·일반 스테이징은 mock. 단일 Client/token —
-  운영·스테이징 동시 사용 금지(재발급 시 이전 토큰 무효).
-- 이번 단계에서 실 credentials 입력·실호출·Streamlit Secrets 변경 없음.
+- 이전에 화면 노출된 Client ID/Secret은 **재발급으로 폐기됨** — 절대 사용 금지.
+- 새 credentials 값은 요청·출력·기록하지 않는다. 코드·테스트·로그·문서에
+  실제 credentials/access token/Authorization 헤더 삽입 금지.
+- 모든 예외 문자열은 고정 문구 + HTTP 상태코드만(요청 body·헤더·응답 본문 비포함).
+  requests 예외는 `from None`으로 체인 차단. 모듈 내 print/log 없음.
+- 운영 정책: 운영 앱만 credentials 상시 보유. 로컬·일반 스테이징은 mock만.
+  최종 실호출 검증 시에만 스테이징에 임시 등록 후 삭제. 운영·스테이징 동시 사용 금지.
+- 단일 Client/token 위험: 토스는 클라이언트당 활성 토큰 1개(재발급 시 이전 토큰
+  즉시 무효) — 두 프로세스가 같은 credentials로 토큰을 발급하면 상호 무효화된다.
 
-## 이번 단계 제한 — 하지 않음
-- Toss API 실호출, 실 credentials 입력, Streamlit Secrets 변경.
-- commit·push, staging 이동, main 병합.
-- DB write(prices/stocks/trade_records) — overlay는 메모리·cache·session_state만.
+## 이번 단계 제한 (1차) — 하지 않음
+- Toss API 실호출·IP 등록·환경변수 연결·Streamlit Secrets 연결.
+- 대시보드(dashboard/app.py) 연결, app/config.py 수정, QuotePair 생성,
+  fallback 연결 — 전부 2차.
+- DB 연결·write 없음. requirements/schema/CSV/workflow 무변경.
 
-## 수정 허용 파일
-- app/config.py
-- app/toss_overlay.py (신규)
-- dashboard/app.py
-- tests/test_toss_overlay.py (신규)
-- tests/test_trades.py (필요 시 최소 — 이번엔 변경 없음)
-- docs/PROJECT_STATE.md, docs/CURRENT_TASK.md
-- (app/toss.py는 foundation 계약 버그 시에만 — 이번엔 변경 없음)
-
-## 보호 범위 — 무변경 확인
-- ETF 2배 환산·수량/반올림·손절/필요자금·DB quote-pair v2 공통일자 로직·Supabase
-  schema/data·일일 파이프라인·기존 FDR fallback·인증 gate·module reload guard·
-  4개 내비게이션·UI/UX 3단계·모바일 카드 압축·requirements·schema·CSV·workflow.
+## 수정 허용 파일 (1차)
+- app/toss.py (신규)
+- tests/test_toss.py (신규)
+- docs/PROJECT_STATE.md
+- docs/CURRENT_TASK.md
 
 ## 검증 결과 (로컬, 2026-07-15)
-- py_compile OK. tests/test_toss_overlay.py 31 passed(mock, 네트워크 0회).
-  전체 pytest 241 passed(210 + 31). git diff --check clean.
-- predeploy_check(--skip-tests): secret 패턴 PASS·compile PASS·requirements·pip check
-  PASS·**Streamlit 서버 health 200, 120초 생존 PASS**. 서버 로그 오류·traceback 없음.
-- credentials 미설정(.env에 TOSS 키 없음) 상태로 실행 — Toss 완전 비활성, 네트워크
-  0회, 기존 매매/섹터 화면·가격·출처 이전과 동일(DB 경로).
+- py_compile app/toss.py OK. tests/test_toss.py 25 passed (mock만, 네트워크 0회).
+- 전체 pytest: .tmp/pytest.log 참조 (기존 185 + 신규 25 = 210).
+- git diff --check clean. 보호 파일(dashboard/app.py·app/config.py·requirements·
+  schema·workflow) 무변경.
 
 ## DB write 허용 여부
-아니오 (읽기 전용 — overlay는 메모리/cache/session_state만)
+아니오 (읽기 전용 — DB 연결 자체 없음)
 
 ## push 허용 여부
-아니오 (commit·push 금지 — 실 credentials 입력 전 별도 승인 대기)
+아니오 (commit·push 금지 — 사용자 승인 대기)

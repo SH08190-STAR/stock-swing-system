@@ -56,15 +56,6 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "(배포 후 입력)")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 
-# ── 토스증권 Open API (선택) ─────────────────────────────────
-# 본주·레버리지 ETF 현재가 live overlay용. 둘 다 설정된 경우에만 활성화하고,
-# 하나라도 없으면 Toss 기능은 조용히 비활성(오류가 아니라 정상 상태 — 기존
-# Supabase/FDR 가격 경로를 그대로 사용한다). 실제 값은 출력·repr·로그하지 않는다.
-# validate_for_collector 필수 목록에 넣지 않는다(수집·인증 gate와 무관).
-TOSS_CLIENT_ID = os.getenv("TOSS_CLIENT_ID", "")
-TOSS_CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET", "")
-
-
 def validate_for_collector():
     """수집/저장 실행 전 필수 환경변수 점검. 누락 시 명확한 메시지."""
     missing = []
