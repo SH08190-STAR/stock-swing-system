@@ -29,15 +29,21 @@
 - 3D(카드 정보 위계·경고·손익 표현): **운영 검증 완료** (`39b8c95`, 2026-07-15).
 - **UI/UX 3단계(3B~3D) 전체 완료.** 3A(전역 config.toml)만 폐기 유지.
 
-## 진행 중 — 토스증권 Open API 실시간 가격 연동 (foundation)
+## 진행 중 — 토스증권 Open API 실시간 가격 연동
 - 목표: Toss Open API로 본주·레버리지 ETF 현재가를 화면 표시용 overlay로 반영
   (Supabase 최신 종가는 fallback·과거 데이터로 유지, DB 틱 저장 없음).
-- 1차 foundation: `app/toss.py`(토큰 관리 + `/api/v1/prices` batch 조회 순수 모듈) +
-  `tests/test_toss.py`(mock 25건, 실호출 0회). 브랜치 feature/toss-api-client-foundation.
-  **실호출·환경변수·대시보드·DB 연결 없음** — 2차에서 대시보드 연동 예정.
+- **1차 foundation 완료**(main=3997bb6): `app/toss.py`(토큰 관리 + `/api/v1/prices`
+  batch 조회 순수 모듈) + `tests/test_toss.py`(mock 25건). GitHub Tests success.
+- **2차 live overlay 진행 중**(로컬 검증 완료, commit·push 전):
+  브랜치 feature/toss-live-overlay(기준 main=3997bb6). 변경 파일:
+  app/config.py(선택 TOSS_CLIENT_ID/SECRET), app/toss_overlay.py 신규(순수 변환·쌍
+  판정), dashboard/app.py(client 캐시·overlay batch·_trade_calc 우선순위·새로고침),
+  tests/test_toss_overlay.py 신규(31건, 실호출 0회). 전체 pytest 241 passed.
+  매매 화면만 대상, DB write 없음. **실 credentials 입력·실호출·commit·push 전** —
+  별도 승인 대기. 상세는 docs/CURRENT_TASK.md.
 - 운영 정책: 운영 앱만 credentials 상시 보유, 로컬·스테이징은 mock 테스트만.
   토스는 클라이언트당 활성 토큰 1개(재발급 시 이전 토큰 무효) + 허용 IP 등록 필요.
-  상세는 docs/CURRENT_TASK.md.
+  우선순위(_trade_calc 한곳): 수동 외부조회 → Toss → Supabase DB.
 
 ## deploy-smoke 실전 검증 이력
 - 2026-07-13: deploy-smoke workflow **최초 실전 검증 성공** (commit f40ba07,
@@ -166,5 +172,6 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
   반환에 `$`→`\$` escape 적용. 위 "USD basis caption 버그 수정 운영 검증" 참조.
 - (참고) 스테이징 인스턴스 Segmentation fault 사건: working cause "장시간 실행 프로세스가 hot update
   후 불안정 → segfault"(추정). fresh process·Reboot로 복구. 위 사건·복구 섹션 참조. 근본 원인 미확정.
-- 미push 로컬 변경: Toss API foundation(feature/toss-api-client-foundation —
-  app/toss.py·tests/test_toss.py 신규 + docs 2건) — 로컬 검증 완료, commit·push 승인 대기.
+- 미push 로컬 변경: Toss API 2차 live overlay(feature/toss-live-overlay —
+  app/config.py·dashboard/app.py 수정 + app/toss_overlay.py·tests/test_toss_overlay.py 신규
+  + docs 2건) — 로컬 검증 완료(241 passed·서버 120초 PASS), commit·push 승인 대기.
