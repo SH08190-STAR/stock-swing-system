@@ -257,6 +257,10 @@ class TossClient:
         - 200개 초과는 200개 단위 chunk로 분할 요청
         - 각 종목의 timestamp는 응답 원본 그대로(같은 batch라도 통일하지 않음)
         - 200 응답에서 누락된 심볼은 반환 dict에 넣지 않는다(호출측 fallback 판단)
+        - 200 응답의 개별 item 불량(가격·timestamp·symbol 형식 오류)은 그 item만
+          제외하고 정상 item은 반환한다 — 일시적 데이터 지연 종목 1개가 batch
+          전체를 실패시키지 않는다. 단 항목이 있는데 전부 불량이면 응답 전체
+          손상으로 보고 TossResponseError(조용히 빈 결과로 숨기지 않음).
         """
         wanted = normalize_symbols(symbols)
         if not wanted:
@@ -273,6 +277,10 @@ class TossClient:
 
     @staticmethod
     def _parse_price_items(resp) -> list[TossPrice]:
+        """가격 응답 파싱. 컨테이너(JSON·result 목록) 오류는 TossResponseError,
+        item 단위 불량은 해당 item만 제외(부분 반환). 빈 목록은 정상 빈 결과.
+        항목이 있는데 유효 item이 0개면 TossResponseError — 전체 손상을 숨기지 않는다.
+        예외 메시지는 고정 문구만(원본 item/body 비포함)."""
         try:
             body = resp.json()
         except ValueError:
@@ -282,15 +290,27 @@ class TossClient:
             raise TossResponseError("가격 응답 result 형식 오류")
         out = []
         for it in items:
-            if not isinstance(it, dict):
-                raise TossResponseError("가격 응답 항목 형식 오류")
-            sym = str(it.get("symbol") or "").strip().upper()
-            if not sym:
-                raise TossResponseError("가격 응답 symbol 누락")
-            out.append(TossPrice(
-                symbol=sym,
-                last_price=_parse_price(it.get("lastPrice")),
-                currency=str(it.get("currency") or "").strip().upper(),
-                timestamp=_parse_timestamp(it.get("timestamp")),
-            ))
+            parsed = TossClient._parse_one_price_item(it)
+            if parsed is not None:
+                out.append(parsed)
+        if items and not out:
+            raise TossResponseError("가격 응답 유효 항목 없음")
         return out
+
+    @staticmethod
+    def _parse_one_price_item(it) -> TossPrice | None:
+        """item 1건 파싱 — 불량(비dict·symbol 누락·가격/timestamp 형식 오류)은 None.
+        누락된 심볼은 반환 dict에 없음 → 호출측이 기존 계약대로 fallback한다."""
+        if not isinstance(it, dict):
+            return None
+        sym = str(it.get("symbol") or "").strip().upper()
+        if not sym:
+            return None
+        try:
+            price = _parse_price(it.get("lastPrice"))
+            ts = _parse_timestamp(it.get("timestamp"))
+        except TossResponseError:
+            return None
+        return TossPrice(symbol=sym, last_price=price,
+                         currency=str(it.get("currency") or "").strip().upper(),
+                         timestamp=ts)

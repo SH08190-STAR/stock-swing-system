@@ -312,6 +312,42 @@ def test_rate_limit_unsafe_retry_after_dropped(retry_after):
     assert "Retry-After" not in r.headers
 
 
+# ── 부분 반환(foundation per-item skip) 연동 ────────────────
+def test_partial_result_three_of_four_returns_200():
+    """TossClient가 4개 요청 중 3개만 돌려줘도(불량 item skip) Relay는 200 +
+    정상 prices만 — 누락 심볼 placeholder 없음."""
+    result = {"NVO": price("NVO", "51.21"), "TSLA": price("TSLA", "393.6"),
+              "TSLL": price("TSLL", "12.18")}
+    client, fake, _ = make_client(result=result)
+    r = client.post("/v1/prices", headers=AUTH_OK,
+                    json={"symbols": ["NVO", "NVOX", "TSLA", "TSLL"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "Toss"
+    assert [p["symbol"] for p in body["prices"]] == ["NVO", "TSLA", "TSLL"]
+    assert "NVOX" not in r.text                     # placeholder/None/0 생성 없음
+    assert fake.calls == [["NVO", "NVOX", "TSLA", "TSLL"]]
+
+
+def test_empty_result_returns_200_empty_prices():
+    """TossClient가 빈 dict를 반환하면(빈 result 정상 처리) 200 + 빈 prices."""
+    client, _, _ = make_client(result={})
+    r = client.post("/v1/prices", headers=AUTH_OK, json={"symbols": ["NVO"]})
+    assert r.status_code == 200
+    assert r.json() == {"provider": "Toss", "prices": []}
+
+
+def test_all_invalid_items_still_maps_to_bad_response():
+    """항목 전부 불량 → foundation TossResponseError → 502 TOSS_BAD_RESPONSE 유지."""
+    client, _, _ = make_client(
+        exc=toss_mod.TossResponseError("가격 응답 유효 항목 없음"))
+    r = client.post("/v1/prices", headers=AUTH_OK, json={"symbols": ["NVO"]})
+    assert r.status_code == 502
+    assert r.json()["error"] == "TOSS_BAD_RESPONSE"
+    for s in SECRET_STRINGS:
+        assert s not in r.text
+
+
 # ── singleton·lazy 생성 ────────────────────────────────────
 def test_toss_client_singleton_reused():
     client, fake, created = make_client(result={})

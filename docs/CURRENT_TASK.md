@@ -6,45 +6,40 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — Streamlit 직접 Toss 호출 → Relay 경유 전환 (mock 구현·로컬 검증)
-> 배경: Fly Relay(nrt, app-scoped static egress IPv4 — 실제 앱 이름·IP는 tracked
-> 파일에 기록하지 않음)가 배포·실조회 검증 완료(NVDA/NVDL 200 OK). 이제
-> Streamlit이 Toss를 직접 호출하지 않고 Relay HTTPS를 경유하도록 배선을 교체한다.
-> Streamlit 설정은 TOSS_RELAY_URL/TOSS_RELAY_TOKEN 두 개뿐 —
-> TOSS_CLIENT_ID/SECRET은 Relay(Fly secrets)에만 존재한다.
+## 목표 — Toss 가격 응답 부분 반환 견고화 (foundation per-item skip)
+> 배경: staging Relay 활성 직후 미장 TP IN batch에서 502 3건 관측(07:22~07:23Z).
+> 진단 결과 credentials/OAuth/IP/Relay 인증 정상, 동일 batch가 이후 200 —
+> 원인은 일시적 데이터 지연 종목(소형 레버리지 ETF)의 불량 item 1개가
+> app/toss.py의 all-or-nothing 파싱으로 batch 전체를 TossResponseError
+> (→Relay 502 TOSS_BAD_RESPONSE)로 만든 구조.
 
-- 브랜치: feature/toss-relay-streamlit-integration (기준 31062a8)
-- 변경:
-  - app/toss_relay_client.py 신규 — 순수 Relay HTTP 클라이언트(RelayPrice·
-    TossRelay* 예외 계층·https 전용 URL 검증·token 최소 32자·Bearer 헤더 전용·
-    200개 chunk·재시도 0·token/원본 body 비노출). endpoint는 /v1/prices 고정.
-  - app/config.py — TOSS_CLIENT_ID/SECRET 제거, TOSS_RELAY_URL/TOSS_RELAY_TOKEN.
-  - dashboard/app.py — _toss_client가 TossRelayClient 생성(lazy import),
-    _fetch_toss_prices가 TossRelayError 격리. 게이트·캐시·우선순위 구조 무변경.
-  - app/toss_overlay.py 무변경(속성 계약 duck-typing으로 RelayPrice 그대로 수용).
-  - services/toss_relay/fly.toml.example — dockerfile 경로를 실배포 검증값
-    "Dockerfile"(fly.toml 위치 기준)로 수정. 실제 fly.toml은 .gitignore 등록.
-- Fix 1 계약(e25046e) 유지: Relay 설정이 없거나 한쪽만 있으면 client 생성·cache
-  접근·심볼 수집·session_state 생성·app.toss_relay_client import(→requests) 전부
-  0회 — 기존 _ext_quote→DB 경로와 동일. token은 cache 인자·key·session_state 금지.
-- 우선순위: 수동 _ext_quote → Relay Toss(쌍은 둘 다 Toss + skew≤300초, 혼합 금지)
-  → DB pair/quote → FDR(수동 버튼). 오류 시 전체 batch DB fallback + 안내 1회.
-- 캐시: client는 cache_resource(프로세스 1개), 가격 batch는 cache_data ttl=20초.
-  새로고침은 batch 캐시만 clear — client·relay token 유지, Toss OAuth는 Relay 소관.
+- 브랜치: feature/toss-relay-partial-results (기준 staging/ui-v3=007a7d8)
+- 변경(3파일, +127/−11):
+  - app/toss.py — _parse_price_items를 item 단위 격리(_parse_one_price_item):
+    컨테이너 오류(JSON·result 형식)는 기존 TossResponseError 유지, 개별 item
+    불량(비dict·symbol 누락·null/0/음수/비숫자 가격·timestamp 누락/파싱불가/naive)
+    은 그 item만 skip하고 정상 item 반환. 빈 result는 정상 {}. 항목이 있는데
+    유효 0개면 TossResponseError(전체 손상 은폐 금지). HTTP/upstream 오류
+    (401/403/404/429/5xx/timeout/OAuth/IP) 매핑은 전부 무변경.
+  - tests/test_toss.py — 부분 반환 12건 추가(불량 유형 9종 parametrize·
+    정상 2+불량 1·빈 result·전부 불량 raise·Decimal/개별 timestamp 보존·
+    원본 값/secret 비노출). 기존 25건 계약 유지.
+  - tests/test_toss_relay.py — 3건 추가(부분 dict → 200 + placeholder 없음·
+    빈 dict → 200 빈 prices·전부 불량 → 502 TOSS_BAD_RESPONSE 유지).
+- 무변경: Relay main/config·toss_relay_client·toss_overlay·dashboard·
+  requirements·Dockerfile·workflows·Relay API schema·오류 매핑·DB fallback.
+- 금지 준수: 심볼별 재호출·bisect·retry·sleep·negative cache·whitelist·
+  특정 티커 예외 처리 없음.
 
 ## 검증 결과 (로컬, 2026-07-16)
-- py_compile OK. tests/test_toss_relay_client.py 41 passed(신규, mock Session만).
-- tests/test_toss_overlay.py 38 passed(기존 38개 계약을 Relay 설정으로 적응).
-- test_toss.py 25 + test_toss_relay.py 49 passed(무변경 유지).
-- 전체 pytest **338 passed**(직전 297 + 신규 41, .tmp/pytest.log). 회귀 없음.
-- 실제 Relay/Toss 네트워크 호출 0회·DB write 0회.
-
-## 이번 단계 제한 — 하지 않음
-- Streamlit Secrets 입력·Relay 실호출·Toss 직접 호출·Fly 변경·
-  main 병합·staging 이동·commit·push·DB write.
+- py_compile OK. toss 4개 파일 168 passed. 전체 pytest **353 passed**
+  (직전 338 + 신규 15, .tmp/pytest.log). 회귀 0. git diff --check clean.
+- 실제 Relay/Toss 네트워크 0회(전부 FakeSession/FakeTossClient)·DB 접근 0회.
+- 배포 필요: 이 수정은 Relay 이미지에 포함되는 app/toss.py이므로
+  **commit·push 후 Fly Relay 재배포가 있어야 운영에 반영**된다(승인 대기).
 
 ## DB write 허용 여부
-아니오 (읽기 전용)
+아니오 (읽기 전용 — DB 접근 없음)
 
 ## push 허용 여부
-아니오 (commit·push 금지 — 사용자 승인 대기)
+아니오 (commit·push·Fly deploy 금지 — 사용자 승인 대기)

@@ -364,6 +364,66 @@ def test_bad_price_or_timestamp_raises_response_error():
             make_client(ses).get_prices(["005930"])
 
 
+# ── 20.5 부분 반환(per-item skip) — 불량 item이 batch를 오염시키지 않음 ──
+BAD_ITEMS = [
+    price_item("BAD1", price=None),                       # null 가격
+    price_item("BAD1", price="0"),                        # 0 가격
+    price_item("BAD1", price="-5"),                       # 음수 가격
+    price_item("BAD1", price="abc"),                      # 비숫자 가격
+    {"lastPrice": "100", "currency": "KRW",
+     "timestamp": "2026-07-15T15:30:00+09:00"},           # symbol 누락
+    {"symbol": "BAD1", "lastPrice": "100", "currency": "KRW"},  # timestamp 누락
+    price_item("BAD1", ts="not-a-date"),                  # timestamp 파싱 불가
+    price_item("BAD1", ts="2026-07-15T15:30:00"),         # naive timestamp
+    "not-an-object",                                      # dict 아님
+]
+
+
+@pytest.mark.parametrize("bad", BAD_ITEMS)
+def test_partial_one_valid_plus_one_bad_returns_valid_only(bad):
+    """정상 1 + 불량 1 → 정상 1개만 반환(예외 없음). 불량 심볼은 dict에 없음
+    (placeholder/None/0 생성 금지) — 호출측 pair 단위 DB fallback 계약 그대로."""
+    ses = FakeSession(post_queue=[token_resp()], get_queue=[prices_resp(
+        price_item("005930", "79300", "KRW", "2026-07-15T15:30:00+09:00"), bad)])
+    out = make_client(ses).get_prices(["005930", "BAD1"])
+    assert list(out) == ["005930"]
+    assert "BAD1" not in out
+    assert out["005930"].last_price == Decimal("79300")
+    assert len(ses.get_calls) == 1        # 자동 재시도·심볼별 재호출 없음
+
+
+def test_partial_two_valid_survive_one_bad():
+    """정상 2 + 불량 1 → 정상 2개 전부 반환, Decimal·개별 timezone timestamp 보존."""
+    ses = FakeSession(post_queue=[token_resp()], get_queue=[prices_resp(
+        price_item("NVO", "51.21", "USD", "2026-07-16T16:57:19+09:00"),
+        price_item("NVOX", price=None),                   # 데이터 지연 종목 흉내
+        price_item("TSLA", "393.6000", "USD", "2026-07-16T16:57:38+09:00"))])
+    out = make_client(ses).get_prices(["NVO", "NVOX", "TSLA"])
+    assert list(out) == ["NVO", "TSLA"]   # 입력 순서 유지, NVOX 미포함
+    assert str(out["TSLA"].last_price) == "393.6000"      # 문자열 정밀도 보존
+    assert out["NVO"].timestamp.isoformat() == "2026-07-16T16:57:19+09:00"
+    assert out["TSLA"].timestamp.isoformat() == "2026-07-16T16:57:38+09:00"
+    assert out["NVO"].timestamp != out["TSLA"].timestamp  # 원본 개별 유지
+
+
+def test_empty_items_returns_empty_dict():
+    """빈 result 목록은 정상 빈 결과 — 예외 없음."""
+    ses = FakeSession(post_queue=[token_resp()], get_queue=[prices_resp()])
+    assert make_client(ses).get_prices(["005930"]) == {}
+
+
+def test_all_items_invalid_raises_response_error():
+    """항목이 있는데 전부 불량 → 전체 응답 손상으로 보고 TossResponseError
+    (조용히 빈 결과로 숨기지 않음). 예외에 원본 item/body·secret 비노출."""
+    ses = FakeSession(post_queue=[token_resp()], get_queue=[prices_resp(
+        price_item("AAA", price=None), price_item("BBB", ts="not-a-date"))])
+    with pytest.raises(TossResponseError) as ei:
+        make_client(ses).get_prices(["AAA", "BBB"])
+    assert_no_secret(ei.value)
+    assert "not-a-date" not in str(ei.value)              # 원본 값 비포함
+    assert "AAA" not in str(ei.value)
+
+
 # ── 21. 비밀값 비노출 ───────────────────────────────────────
 def test_no_secret_leak_in_any_exception_or_repr():
     scenarios = [

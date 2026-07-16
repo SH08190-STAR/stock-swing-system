@@ -202,7 +202,11 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
 - staging segfault 사건(2026-07-15): 0161184 배포 상태에서 매매→미장→TP IN 재현,
   revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1(e25046e)로 비활성 경로
   우회, 스테이징 검증 성공.
-- 미push 로컬 변경: Streamlit→Relay 연동(feature/toss-relay-streamlit-integration —
-  app/toss_relay_client.py + tests 41건 신규, config/dashboard/overlay 테스트 적응,
-  fly.toml.example 경로 수정, .gitignore) — 로컬 검증 완료(전체 338 passed),
-  commit·push 승인 대기. Streamlit Secrets 입력·운영 연동은 미실행.
+- Streamlit→Relay 연동: **staging 배포 완료**(staging/ui-v3=007a7d8, FF,
+  GitHub 3 checks success, smoke 16회/실패 0). staging Relay Secrets 입력 후
+  활성 경로에서 502 3건 → 진단으로 원인 확정: 일시 데이터 지연 종목의 불량
+  item 1개가 foundation all-or-nothing 파싱으로 batch 전체 실패(인증/IP 정상,
+  동일 batch 이후 200).
+- 미push 로컬 변경: 부분 반환 견고화(feature/toss-relay-partial-results —
+  app/toss.py per-item skip + tests 15건, 3파일 +127/−11) — 로컬 검증 완료
+  (전체 353 passed), commit·push·**Fly Relay 재배포** 승인 대기.
