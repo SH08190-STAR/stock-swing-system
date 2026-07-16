@@ -6,51 +6,45 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — Toss 시세 전용 Relay 서비스 foundation (Fly.io static egress)
-> 배경: Streamlit Community Cloud outbound IP 수가 토스 허용 IP 한도(10개)를
-> 초과해 **직접 Toss API 호출 방식은 폐기**. 일부 IP만 등록하는 불안정한 방식
-> 금지. 고정 outbound IP를 가진 **Fly.io Relay(Tokyo nrt, shared-cpu-1x 256MB
-> 1대 상시 실행, app-scoped static egress IPv4 1개만 토스에 등록)** 방식 채택.
+## 목표 — Streamlit 직접 Toss 호출 → Relay 경유 전환 (mock 구현·로컬 검증)
+> 배경: Fly Relay(nrt, app-scoped static egress IPv4 — 실제 앱 이름·IP는 tracked
+> 파일에 기록하지 않음)가 배포·실조회 검증 완료(NVDA/NVDL 200 OK). 이제
+> Streamlit이 Toss를 직접 호출하지 않고 Relay HTTPS를 경유하도록 배선을 교체한다.
+> Streamlit 설정은 TOSS_RELAY_URL/TOSS_RELAY_TOKEN 두 개뿐 —
+> TOSS_CLIENT_ID/SECRET은 Relay(Fly secrets)에만 존재한다.
 
-- 브랜치: feature/toss-relay-service (기준 feature/toss-live-overlay-fix1=e25046e)
-- 이번 범위(코드·테스트·배포 문서·CI까지만):
-  - services/toss_relay/ — FastAPI Relay (main.py·config.py·전용 requirements·
-    Dockerfile·fly.toml.example·README.md), app/toss.py TossClient 재사용(복제 없음)
-  - 전용 requirements: fastapi·starlette·uvicorn·pydantic·requests 5개를
-    로컬 검증 통과 조합으로 정확히 고정(==). Streamlit·pandas·supabase 등 미포함.
-  - Dockerfile base = python:3.12.8-slim-bookworm(patch·Debian 고정), 비root
-    uid 10001, 명시적 최소 COPY, PYTHONPATH=/srv, worker 1. + 루트 .dockerignore.
-  - 공개 endpoint 정확히 2개: GET /healthz(무인증·Toss 미호출),
-    POST /v1/prices(Bearer RELAY_SHARED_SECRET, 심볼 1~200개 문자열만)
-  - tests/test_toss_relay.py 49건(실 네트워크 0회) +
-    .github/workflows/toss-relay-tests.yml(신규 2 job: relay-tests +
-    docker-build-health[healthz만 검증·secret 로그 비노출 검사], 기존 tests.yml 무변경)
-- 제외 범위(아직 미실행): Fly 앱 생성·flyctl 인증·결제·실배포·egress IP 할당·
-  토스 허용 IP 변경·실 credentials 입력·실 Toss 호출·Streamlit Secrets 변경·
-  dashboard 연동. **실제 배포·실호출 전 상태.**
-
-## Security boundary
-- Toss credentials(TOSS_CLIENT_ID/SECRET)는 향후 **Relay(Fly secrets)에만** 존재.
-  Streamlit에는 TOSS_RELAY_URL/TOSS_RELAY_TOKEN만 입력 예정.
-- Relay 인증: Authorization Bearer + hmac.compare_digest(상수 시간),
-  secret 32자 미만이면 시작 실패, 모든 인증 실패는 동일한 일반 401.
-- 오류 응답은 error code + 고정 문구만 — 상류 본문·예외 repr·token·secret 비노출.
-  Cache-Control: no-store, CORS 미허용, docs/openapi 비활성(그 외 endpoint 404).
-- TossClient는 프로세스당 1개 lazy 생성(uvicorn worker 1·Machine 최대 1대 정책),
-  import·healthz만으로 토큰 발급 없음. 주문·계좌 API 접근 기능 없음(추가 금지).
+- 브랜치: feature/toss-relay-streamlit-integration (기준 31062a8)
+- 변경:
+  - app/toss_relay_client.py 신규 — 순수 Relay HTTP 클라이언트(RelayPrice·
+    TossRelay* 예외 계층·https 전용 URL 검증·token 최소 32자·Bearer 헤더 전용·
+    200개 chunk·재시도 0·token/원본 body 비노출). endpoint는 /v1/prices 고정.
+  - app/config.py — TOSS_CLIENT_ID/SECRET 제거, TOSS_RELAY_URL/TOSS_RELAY_TOKEN.
+  - dashboard/app.py — _toss_client가 TossRelayClient 생성(lazy import),
+    _fetch_toss_prices가 TossRelayError 격리. 게이트·캐시·우선순위 구조 무변경.
+  - app/toss_overlay.py 무변경(속성 계약 duck-typing으로 RelayPrice 그대로 수용).
+  - services/toss_relay/fly.toml.example — dockerfile 경로를 실배포 검증값
+    "Dockerfile"(fly.toml 위치 기준)로 수정. 실제 fly.toml은 .gitignore 등록.
+- Fix 1 계약(e25046e) 유지: Relay 설정이 없거나 한쪽만 있으면 client 생성·cache
+  접근·심볼 수집·session_state 생성·app.toss_relay_client import(→requests) 전부
+  0회 — 기존 _ext_quote→DB 경로와 동일. token은 cache 인자·key·session_state 금지.
+- 우선순위: 수동 _ext_quote → Relay Toss(쌍은 둘 다 Toss + skew≤300초, 혼합 금지)
+  → DB pair/quote → FDR(수동 버튼). 오류 시 전체 batch DB fallback + 안내 1회.
+- 캐시: client는 cache_resource(프로세스 1개), 가격 batch는 cache_data ttl=20초.
+  새로고침은 batch 캐시만 clear — client·relay token 유지, Toss OAuth는 Relay 소관.
 
 ## 검증 결과 (로컬, 2026-07-16)
-- py_compile OK. tests/test_toss_relay.py 49 passed(외부 socket 차단 fixture).
-- test_toss.py + test_toss_overlay.py 63 passed(무변경 유지).
-- 전체 pytest **297 passed**(기존 248 + relay 49, .tmp/pytest.log). 회귀 없음.
-- workflow YAML·fly.toml.example TOML 문법 검증 OK. git diff --check clean.
-- 보호 파일(dashboard·app/toss·requirements·tests.yml 등) 무변경 확인.
-- Docker build/health: 로컬에 Docker 미설치 → GitHub Actions docker-build-health
-  job에서 build + healthz 200 + 로그 secret 비노출을 검증(가짜 credential,
-  /v1/prices 미호출로 실 Toss 네트워크 0회).
+- py_compile OK. tests/test_toss_relay_client.py 41 passed(신규, mock Session만).
+- tests/test_toss_overlay.py 38 passed(기존 38개 계약을 Relay 설정으로 적응).
+- test_toss.py 25 + test_toss_relay.py 49 passed(무변경 유지).
+- 전체 pytest **338 passed**(직전 297 + 신규 41, .tmp/pytest.log). 회귀 없음.
+- 실제 Relay/Toss 네트워크 호출 0회·DB write 0회.
+
+## 이번 단계 제한 — 하지 않음
+- Streamlit Secrets 입력·Relay 실호출·Toss 직접 호출·Fly 변경·
+  main 병합·staging 이동·commit·push·DB write.
 
 ## DB write 허용 여부
-아니오 (읽기 전용 — DB 연결 없음)
+아니오 (읽기 전용)
 
 ## push 허용 여부
 아니오 (commit·push 금지 — 사용자 승인 대기)

@@ -51,16 +51,26 @@
   일부 IP만 등록하는 방식 금지. **Fly.io static-egress Relay 방식 채택**
   (Tokyo nrt, shared-cpu-1x 256MB 1대 상시 실행, app-scoped static egress
   IPv4 1개만 토스에 등록, Fly HTTPS endpoint 사용·별도 도메인 없음).
-- **Relay foundation 진행 중**(브랜치 feature/toss-relay-service, commit 전):
-  services/toss_relay/(FastAPI, TossClient 재사용) + tests/test_toss_relay.py
-  49건 + toss-relay-tests.yml. 공개 endpoint 2개(healthz·v1/prices)·Bearer
-  shared secret·오류 코드 매핑·secret 비노출. **아직 Fly 배포·egress IP 할당·
-  실 Toss 호출 전 단계다(코드·테스트·문서만 존재).** 상세: CURRENT_TASK.md·
-  services/toss_relay/README.md.
-- 운영 정책: Toss credentials는 향후 Relay(Fly secrets)에만 존재, Streamlit에는
+- **Relay 배포·실조회 검증 완료(2026-07-16)**: feature/toss-relay-service=31062a8
+  push, GitHub tests·relay-tests·docker-build-health 전부 success. Fly Relay 앱
+  (nrt, shared-cpu-1x 256MB, Machine 1대, worker 1 — 실제 앱 이름·URL·egress
+  IPv4는 tracked 파일에 기록하지 않는다: 로컬 fly.toml·Fly 대시보드 참조) 배포,
+  app-scoped static egress IPv4 1쌍(nrt)을 Toss 허용 IP에 등록.
+  credentials 재입력 사건 2회(1글자 잘림 → OAuth 401 invalid_client) 후 정상화 —
+  NVDA/NVDL 실조회 200 OK(Decimal 문자열·USD·timezone-aware timestamp),
+  secret/token 로그 비노출, restart 0. 운영 비용 약 $5.6/월(Machine ~$2 +
+  egress IP $3.60). 실제 services/toss_relay/fly.toml은 로컬 전용(.gitignore) —
+  dockerfile 경로는 fly.toml 위치 기준 "Dockerfile"이 검증값(example에 반영).
+- **Streamlit 연동 진행 중**(브랜치 feature/toss-relay-streamlit-integration,
+  commit 전): 직접 Toss 호출 경로 제거 — app/toss_relay_client.py(신규 순수
+  클라이언트) + config TOSS_RELAY_URL/TOSS_RELAY_TOKEN + dashboard _toss_client
+  교체. Fix 1 비활성 우회 계약 유지. 전체 pytest 338 passed(신규 41 포함).
+  **Streamlit Secrets 미입력 — 아직 운영 연동 전.** 상세: CURRENT_TASK.md.
+- 운영 정책: Toss credentials는 Relay(Fly secrets)에만 존재, Streamlit에는
   TOSS_RELAY_URL/TOSS_RELAY_TOKEN만. 토스는 클라이언트당 활성 토큰 1개
-  (재발급 시 이전 토큰 무효) → Relay Machine 최대 1대·worker 1개.
-  우선순위(_trade_calc 한곳): 수동 외부조회 → Toss → Supabase DB.
+  (재발급 시 이전 토큰 무효) → Relay Machine 최대 1대·worker 1개,
+  static egress IP release 금지. 우선순위(_trade_calc 한곳):
+  수동 외부조회 → Relay Toss → Supabase DB.
 
 ## deploy-smoke 실전 검증 이력
 - 2026-07-13: deploy-smoke workflow **최초 실전 검증 성공** (commit f40ba07,
@@ -192,7 +202,7 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
 - staging segfault 사건(2026-07-15): 0161184 배포 상태에서 매매→미장→TP IN 재현,
   revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1(e25046e)로 비활성 경로
   우회, 스테이징 검증 성공.
-- 미push 로컬 변경: Toss Relay foundation(feature/toss-relay-service —
-  services/toss_relay/ 신규 + tests/test_toss_relay.py 49건 + 신규 workflow
-  toss-relay-tests.yml + docs 2건) — 로컬 검증 완료(전체 297 passed),
-  commit·push 승인 대기. Fly 배포·실호출은 미실행.
+- 미push 로컬 변경: Streamlit→Relay 연동(feature/toss-relay-streamlit-integration —
+  app/toss_relay_client.py + tests 41건 신규, config/dashboard/overlay 테스트 적응,
+  fly.toml.example 경로 수정, .gitignore) — 로컬 검증 완료(전체 338 passed),
+  commit·push 승인 대기. Streamlit Secrets 입력·운영 연동은 미실행.

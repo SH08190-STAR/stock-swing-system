@@ -56,13 +56,15 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "(배포 후 입력)")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 
-# ── 토스증권 Open API (선택) ─────────────────────────────────
-# 본주·레버리지 ETF 현재가 live overlay용. 둘 다 설정된 경우에만 활성화하고,
+# ── 토스 시세 Relay (선택) ───────────────────────────────────
+# 본주·레버리지 ETF 현재가 live overlay용. Streamlit은 Toss를 직접 호출하지 않고
+# Fly.io Relay(고정 egress IP)를 경유한다. 두 값이 모두 설정된 경우에만 활성화하고,
 # 하나라도 없으면 Toss 기능은 조용히 비활성(오류가 아니라 정상 상태 — 기존
 # Supabase/FDR 가격 경로를 그대로 사용한다). 실제 값은 출력·repr·로그하지 않는다.
+# TOSS_CLIENT_ID/SECRET은 Relay(Fly secrets)에만 존재하며 Streamlit에 넣지 않는다.
 # validate_for_collector 필수 목록에 넣지 않는다(수집·인증 gate와 무관).
-TOSS_CLIENT_ID = os.getenv("TOSS_CLIENT_ID", "")
-TOSS_CLIENT_SECRET = os.getenv("TOSS_CLIENT_SECRET", "")
+TOSS_RELAY_URL = os.getenv("TOSS_RELAY_URL", "")
+TOSS_RELAY_TOKEN = os.getenv("TOSS_RELAY_TOKEN", "")
 
 
 def validate_for_collector():

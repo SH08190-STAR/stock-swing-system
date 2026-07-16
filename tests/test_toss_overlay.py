@@ -1,8 +1,9 @@
-"""Toss live overlay 2차 검증 — 순수 selection·conversion·fallback + 대시보드 배선.
+"""Toss live overlay(Relay 경유) 검증 — 순수 selection·conversion·fallback + 대시보드 배선.
 
-실제 Toss 네트워크 호출은 0회다(FakeTossClient·monkeypatch만 사용).
+실제 Relay/Toss 네트워크 호출은 0회다(FakeTossClient·monkeypatch만 사용).
 DOM·픽셀·Streamlit 내부 클래스에 결합하지 않고, 계약(우선순위·일관성·fallback)만 본다.
-아래 credentials는 형식만 흉내 낸 가짜 값이다(실제 발급값 아님)."""
+아래 URL/token은 형식만 흉내 낸 가짜 값이다(실제 발급값 아님).
+overlay 순수 로직은 TossPrice/RelayPrice 어느 쪽이든 동일 속성 계약으로 동작한다."""
 import os
 import importlib.util
 import datetime as dt
@@ -11,14 +12,16 @@ from decimal import Decimal
 import pytest
 
 from app import toss_overlay as tov
-from app.toss import (TossPrice, TossApiError, TossAuthError, TossForbiddenError,
-                      TossRateLimitError, TossTimeoutError, TossResponseError)
+from app.toss import TossPrice
+from app.toss_relay_client import (TossRelayError, TossRelayAuthError,
+                                   TossRelayRateLimitError, TossRelayTimeoutError,
+                                   TossRelayUpstreamError, TossRelayResponseError)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-FAKE_ID = "c_FAKE_OVERLAY_ID"
-FAKE_CSEC = "s_FAKE_OVERLAY_CRED"          # 가짜 값(실제 발급값 아님) — 비밀 아님
-LEAK_STRINGS = (FAKE_ID, FAKE_CSEC, "Authorization", "Bearer")
+FAKE_RELAY_URL = "https://fake-relay.example.dev"          # 가짜 값 — 비밀 아님
+FAKE_RELAY_TOKEN = "relay_FAKE_OVERLAY_TOKEN_0123456789AB"  # 40자 가짜
+LEAK_STRINGS = (FAKE_RELAY_TOKEN, "Authorization", "Bearer")
 
 
 def _dash():
@@ -53,11 +56,11 @@ class FakeTossClient:
 # ══ 순수 로직: toss_overlay ═════════════════════════════════
 # ── 1~2. credentials 게이트 ─────────────────────────────────
 def test_is_configured_both_one_none():
-    assert tov.is_configured(FAKE_ID, FAKE_CSEC) is True
-    assert tov.is_configured(FAKE_ID, "") is False
-    assert tov.is_configured("", FAKE_CSEC) is False
+    assert tov.is_configured(FAKE_RELAY_URL, FAKE_RELAY_TOKEN) is True
+    assert tov.is_configured(FAKE_RELAY_URL, "") is False
+    assert tov.is_configured("", FAKE_RELAY_TOKEN) is False
     assert tov.is_configured(None, None) is False
-    assert tov.is_configured("  ", FAKE_CSEC) is False   # 공백만 → 미설정
+    assert tov.is_configured("  ", FAKE_RELAY_TOKEN) is False   # 공백만 → 미설정
 
 
 # ── 5. visible 심볼 수집(중복 제거·순서·resolve) ────────────
@@ -138,10 +141,10 @@ def test_decimal_and_currency_preserved():
 
 
 # ══ 대시보드 배선: 활성/비활성 · fetch 격리 · 우선순위 ══════
-# ── Fix 1: credentials 비활성 = Toss 경로 완전 우회 (3997bb6 동일 경로) ──
-def _set_creds(m, monkeypatch, cid, csec):
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_ID", cid)
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_SECRET", csec)
+# ── Fix 1: Relay 설정 비활성 = Toss 경로 완전 우회 (3997bb6 동일 경로) ──
+def _set_creds(m, monkeypatch, url, token):
+    monkeypatch.setattr(m.config, "TOSS_RELAY_URL", url)
+    monkeypatch.setattr(m.config, "TOSS_RELAY_TOKEN", token)
 
 
 def _pop_overlay_key(m):
@@ -168,19 +171,20 @@ def test_dashboard_disabled_when_no_creds(monkeypatch):
 
 def test_dashboard_disabled_with_one_cred(monkeypatch):
     m = _dash()
-    _set_creds(m, monkeypatch, FAKE_ID, "")
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, "")          # URL만 → 비활성
     assert m.toss_enabled() is False
-    _set_creds(m, monkeypatch, "", FAKE_CSEC)
+    _set_creds(m, monkeypatch, "", FAKE_RELAY_TOKEN)        # token만 → 비활성
     assert m.toss_enabled() is False
 
 
-@pytest.mark.parametrize("cid,csec", [("", ""), (FAKE_ID, ""), ("", FAKE_CSEC)])
-def test_disabled_gate_runs_no_toss_paths(monkeypatch, cid, csec):
+@pytest.mark.parametrize("url,token", [("", ""), (FAKE_RELAY_URL, ""),
+                                       ("", FAKE_RELAY_TOKEN)])
+def test_disabled_gate_runs_no_toss_paths(monkeypatch, url, token):
     """비활성(둘 다/한쪽 없음): 게이트가 client·raw·apply·심볼수집·info를 전부 우회하고
     session_state에 Toss key를 만들지 않으며 기존 key도 건드리지 않는다.
     필터 변경(서로 다른 records)을 반복해도 호출 0회."""
     m = _dash()
-    _set_creds(m, monkeypatch, cid, csec)
+    _set_creds(m, monkeypatch, url, token)
     _pop_overlay_key(m)
     calls = []
     monkeypatch.setattr(m, "_toss_client", _spy(calls, "client"))
@@ -229,13 +233,16 @@ def test_disabled_trade_calc_uses_pure_db_path(monkeypatch):
     assert c2["provider"] == "Supabase" and c2["base_now"] == 180.0
 
 
-def test_dashboard_load_and_disabled_run_without_apptoss_import(monkeypatch):
-    """dashboard 로드 + 비활성 경로 실행이 app.toss(→requests) import를 요구하지 않는다."""
+def test_dashboard_load_and_disabled_run_without_relay_import(monkeypatch):
+    """dashboard 로드 + 비활성 경로 실행이 app.toss_relay_client(→requests)·app.toss
+    import를 요구하지 않는다(비활성 프로세스에 로드 0)."""
     import sys
-    saved = sys.modules.pop("app.toss", None)
+    saved_relay = sys.modules.pop("app.toss_relay_client", None)
+    saved_toss = sys.modules.pop("app.toss", None)
     try:
         m = _dash()
-        assert "app.toss" not in sys.modules   # 모듈 로드만으로 import 없음
+        assert "app.toss_relay_client" not in sys.modules   # 모듈 로드만으로 import 없음
+        assert "app.toss" not in sys.modules
         _set_creds(m, monkeypatch, "", "")
         _pop_overlay_key(m)
         assert m._maybe_apply_toss_overlay(
@@ -245,16 +252,19 @@ def test_dashboard_load_and_disabled_run_without_apptoss_import(monkeypatch):
         monkeypatch.setattr(m, "db_single_quote", lambda s: None)
         m._trade_calc({"id": "x", "market_group": "US", "symbol": "NVDA",
                        "leverage_symbol": "", "stop": 1})
-        assert "app.toss" not in sys.modules   # 비활성 실행 후에도 import 없음
+        assert "app.toss_relay_client" not in sys.modules   # 비활성 실행 후에도 import 없음
+        assert "app.toss" not in sys.modules
     finally:
-        if saved is not None:
-            sys.modules["app.toss"] = saved
+        if saved_relay is not None:
+            sys.modules["app.toss_relay_client"] = saved_relay
+        if saved_toss is not None:
+            sys.modules["app.toss"] = saved_toss
 
 
 def test_enabled_gate_calls_apply_once(monkeypatch):
     """활성: 게이트가 _apply_toss_overlay를 정확히 1회 호출."""
     m = _dash()
-    _set_creds(m, monkeypatch, FAKE_ID, FAKE_CSEC)
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
     called = []
     monkeypatch.setattr(m, "_apply_toss_overlay", lambda recs: called.append(list(recs)))
     assert m._maybe_apply_toss_overlay([{"symbol": "NVDA"}]) is True
@@ -262,17 +272,16 @@ def test_enabled_gate_calls_apply_once(monkeypatch):
 
 
 def test_toss_client_never_caches_none(monkeypatch):
-    """_toss_client는 유효한 TossClient만 반환 — None을 cache_resource에 저장하지 않는다.
-    빈 credentials로 잘못 호출되면(게이트 밖) 예외로 방어(예외는 캐시되지 않음)."""
+    """_toss_client는 유효한 TossRelayClient만 반환 — None을 cache_resource에 저장 안 함.
+    빈 설정으로 잘못 호출되면(게이트 밖) 예외로 방어(예외는 캐시되지 않음)."""
     m = _dash()
     m._toss_client.clear()
-    _set_creds(m, monkeypatch, FAKE_ID, FAKE_CSEC)
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
     c = m._toss_client()
-    assert c is not None and type(c).__name__ == "TossClient"
+    assert c is not None and type(c).__name__ == "TossRelayClient"
     m._toss_client.clear()
     _set_creds(m, monkeypatch, "", "")
-    from app.toss import TossAuthError
-    with pytest.raises(TossAuthError):
+    with pytest.raises(TossRelayError):
         m._toss_client()
     m._toss_client.clear()
 
@@ -280,13 +289,13 @@ def test_toss_client_never_caches_none(monkeypatch):
 def test_dashboard_enabled_builds_and_reuses_client(monkeypatch):
     m = _dash()
     m._toss_client.clear()
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_ID", FAKE_ID)
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_SECRET", FAKE_CSEC)
+    monkeypatch.setattr(m.config, "TOSS_RELAY_URL", FAKE_RELAY_URL)
+    monkeypatch.setattr(m.config, "TOSS_RELAY_TOKEN", FAKE_RELAY_TOKEN)
     c1 = m._toss_client()
     c2 = m._toss_client()
     assert c1 is not None and c1 is c2                    # cache_resource 재사용
-    assert type(c1).__name__ == "TossClient"
-    for s in LEAK_STRINGS:                              # repr에 secret 비노출
+    assert type(c1).__name__ == "TossRelayClient"
+    for s in LEAK_STRINGS:                              # repr에 token 비노출
         assert s not in repr(c1)
 
 
@@ -303,14 +312,17 @@ def test_overlay_raw_caches_batch(monkeypatch):
     assert len(fake.calls) == 1                           # 20초 캐시 — 재조회 없음
 
 
-# ── 16~20. Toss 오류 → 전부 격리(빈 dict + 타입명), 재시도 없음 ──
+# ── 16~20. Relay 오류 → 전부 격리(빈 dict + 타입명), 재시도 없음 ──
 @pytest.mark.parametrize("exc,tag", [
-    (TossAuthError("인증 실패 (재발급 후에도 401)"), "TossAuthError"),
-    (TossForbiddenError("접근 거부 (403)"), "TossForbiddenError"),
-    (TossRateLimitError("호출 한도 초과 (429)", 7), "TossRateLimitError"),
-    (TossTimeoutError("timeout"), "TossTimeoutError"),
-    (TossResponseError("가격 응답 형식 오류"), "TossResponseError"),
-    (TossApiError("서버 오류 (503)"), "TossApiError"),
+    (TossRelayAuthError("Relay 인증 실패 (401)"), "TossRelayAuthError"),
+    (TossRelayRateLimitError("Relay 호출 한도 초과 (429)", 7), "TossRelayRateLimitError"),
+    (TossRelayTimeoutError("Relay 요청 timeout"), "TossRelayTimeoutError"),
+    (TossRelayUpstreamError("Relay 상류 오류 (502)", "TOSS_IP_FORBIDDEN"),
+     "TossRelayUpstreamError"),
+    (TossRelayUpstreamError("Relay 상류 오류 (503)", "TOSS_AUTH_FAILED"),
+     "TossRelayUpstreamError"),
+    (TossRelayResponseError("Relay 응답 provider 오류"), "TossRelayResponseError"),
+    (TossRelayError("Relay 네트워크 오류"), "TossRelayError"),
     (RuntimeError("unexpected boom"), "TossUnexpected"),
 ])
 def test_fetch_isolates_all_errors(monkeypatch, exc, tag):
@@ -444,24 +456,24 @@ def test_trade_calc_no_overlay_uses_db(monkeypatch):
     assert c["provider"] == "Supabase" and c["consistent"] is True
 
 
-# ── 22. 새로고침: Toss price 캐시만 clear, token(client)은 유지 ──
+# ── 22. 새로고침: Relay price 캐시만 clear, client(+token)는 유지 ──
 def test_refresh_clears_price_cache_keeps_token(monkeypatch):
     m = _dash()
     m._toss_client.clear()
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_ID", FAKE_ID)
-    monkeypatch.setattr(m.config, "TOSS_CLIENT_SECRET", FAKE_CSEC)
+    monkeypatch.setattr(m.config, "TOSS_RELAY_URL", FAKE_RELAY_URL)
+    monkeypatch.setattr(m.config, "TOSS_RELAY_TOKEN", FAKE_RELAY_TOKEN)
     c1 = m._toss_client()
     m.clear_price_caches()                               # 예외 없이 동작
     c2 = m._toss_client()
-    assert c1 is c2                                       # client(=토큰 캐시) 재생성 안 함
+    assert c1 is c2                       # client(+relay token) 재생성 안 함
 
 
 # ── 23. 예외/오류표식에 secret·token 비노출 ─────────────────
 def test_no_secret_leak_in_fetch_errors(monkeypatch):
     m = _dash()
-    for exc in (TossAuthError("인증 실패 (재발급 후에도 401)"),
-                TossRateLimitError("호출 한도 초과 (429)", 7),
-                TossResponseError("가격 응답 형식 오류")):
+    for exc in (TossRelayAuthError("Relay 인증 실패 (401)"),
+                TossRelayRateLimitError("Relay 호출 한도 초과 (429)", 7),
+                TossRelayResponseError("Relay 응답 provider 오류")):
         fake = FakeTossClient(raises=exc)
         _prices, err = m._fetch_toss_prices(fake, ["005930"])
         for s in LEAK_STRINGS:                          # 오류표식은 타입명만

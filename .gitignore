@@ -5,3 +5,5 @@ __pycache__/
 .streamlit/secrets.toml
 .claude/settings.local.json
 .tmp/
+# 실제 Fly 배포 설정(앱 이름 포함) — 저장소에는 fly.toml.example만 둔다
+services/toss_relay/fly.toml

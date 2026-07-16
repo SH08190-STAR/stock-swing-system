@@ -7,11 +7,13 @@
 #   fly scale count 1 --app <APP_NAME>
 # 이유: Toss는 클라이언트당 활성 토큰 1개 → Machine 2대면 토큰이 서로 무효화됨.
 
-app = "REPLACE-WITH-RELAY-APP-NAME"     # placeholder — 실제 앱 이름 미정
+app = "REPLACE-WITH-RELAY-APP-NAME"     # placeholder — 실제 앱 이름은 fly.toml에만
 primary_region = "nrt"                  # Tokyo
 
 [build]
-  dockerfile = "services/toss_relay/Dockerfile"
+  # 주의: 이 경로는 fly.toml "위치" 기준 상대경로다(빌드 컨텍스트 기준 아님).
+  # 실배포에서 검증된 값 — services/toss_relay/Dockerfile로 중복 결합하면 배포 실패.
+  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080

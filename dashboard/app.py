@@ -35,7 +35,7 @@ from app import config
 from app import database as db
 from app import quotes as qt
 from app import watchlist as wl
-from app import toss_overlay as tov   # 순수 모듈(quotes만 의존) — app.toss는 lazy import
+from app import toss_overlay as tov   # 순수 모듈(quotes만 의존) — relay client는 lazy import
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
 
@@ -964,59 +964,64 @@ def fdr_single_quote(symbol: str):
     return qt.fetch_fdr_snapshot(symbol)
 
 
-# ── Toss live overlay (app/toss.py + app/toss_overlay.py) ───────────────────
+# ── Toss live overlay (app/toss_relay_client.py + app/toss_overlay.py) ──────
+# Streamlit은 Toss를 직접 호출하지 않는다 — Fly.io Relay(HTTPS, 고정 egress IP)를
+# 경유한다. Toss credentials·OAuth token은 Relay 서버에만 존재하며, Streamlit 설정은
+# TOSS_RELAY_URL/TOSS_RELAY_TOKEN 두 개뿐이다.
 # 우선순위(한곳에서 명확히): 1) 사용자가 버튼으로 조회한 수동 외부(FDR) 결과(_ext_quote)
-# → 2) Toss live overlay → 3) Supabase DB(공통일자 pair / 최신 quote) → 4) 기존 FDR.
-# 4)는 (1)의 수동 버튼 경로와 동일하다(렌더 기본 경로는 DB, 외부는 버튼일 때만).
+# → 2) Relay 경유 Toss live overlay → 3) Supabase DB(공통일자 pair / 최신 quote)
+# → 4) 기존 FDR. 4)는 (1)의 수동 버튼 경로와 동일하다.
 #
-# Fix 1 (staging segfault 격리 후): credentials 미설정이면 Toss 기능이 "존재하지 않는
-# 것처럼" 동작한다 — 게이트는 _maybe_apply_toss_overlay 한곳이며, 비활성 상태에서는
-# _toss_client/_toss_overlay_raw/심볼 수집/session_state 생성/app.toss import(→requests)
-# 를 일절 실행하지 않는다(3997bb6 실행 경로와 동일). cache_resource에 None을 저장하지
-# 않고, app.toss는 활성 경로에서만 lazy import한다.
+# Fix 1 계약(e25046e 검증) 유지: Relay 설정이 없거나 한쪽만 있으면 Toss 기능이
+# "존재하지 않는 것처럼" 동작한다 — 게이트는 _maybe_apply_toss_overlay 한곳이며,
+# 비활성 상태에서는 _toss_client/_toss_overlay_raw/심볼 수집/session_state 생성/
+# app.toss_relay_client import(→requests)를 일절 실행하지 않는다(3997bb6 동일 경로).
+# cache_resource에 None을 저장하지 않고, relay client는 활성 경로에서만 lazy import한다.
+# token은 cache 인자·cache key·session_state 어디에도 넣지 않는다.
 TOSS_MAX_SKEW_SEC = 300               # 본주·ETF 기준시각 허용 차이(5분)
 _TOSS_OVERLAY_KEY = "_toss_overlay"   # 현재 rerun의 {symbol: TossPrice} (session_state)
 
 
 def toss_enabled() -> bool:
-    """Toss live overlay 활성 여부 — credentials 둘 다 설정됐을 때만 True.
-    순수 문자열 검사만 한다(cache·client·import 접근 없음)."""
-    return tov.is_configured(config.TOSS_CLIENT_ID, config.TOSS_CLIENT_SECRET)
+    """Toss live overlay(Relay 경유) 활성 여부 — TOSS_RELAY_URL·TOSS_RELAY_TOKEN이
+    둘 다 설정됐을 때만 True. 순수 문자열 검사만 한다(cache·client·import 접근 없음)."""
+    return tov.is_configured(config.TOSS_RELAY_URL, config.TOSS_RELAY_TOKEN)
 
 
 @st.cache_resource
 def _toss_client():
-    """유효한 TossClient 1개를 만들어 프로세스 내 재사용한다(None을 캐시하지 않음).
-    반드시 toss_enabled() 게이트 뒤에서만 호출한다 — credentials 미설정 상태에서는
-    호출 자체가 없어야 하며, 만약 호출되면 TossClient 생성자가 TossAuthError를 던진다.
-    app.toss(→requests)는 여기서 처음 import한다(비활성 프로세스에 로드하지 않음)."""
-    from app.toss import TossClient            # lazy runtime import (활성 경로 전용)
-    return TossClient(config.TOSS_CLIENT_ID, config.TOSS_CLIENT_SECRET)
+    """유효한 TossRelayClient 1개를 만들어 프로세스 내 재사용한다(None을 캐시하지 않음).
+    반드시 toss_enabled() 게이트 뒤에서만 호출한다 — Relay 설정이 없는 상태에서는
+    호출 자체가 없어야 하며, 만약 호출되면 생성자가 예외를 던진다(예외는 캐시 안 됨).
+    app.toss_relay_client(→requests)는 여기서 처음 import한다(비활성 프로세스에 로드 없음).
+    token은 인자·cache key에 넣지 않는다 — config에서 직접 읽는다."""
+    from app.toss_relay_client import TossRelayClient   # lazy import (활성 경로 전용)
+    return TossRelayClient(config.TOSS_RELAY_URL, config.TOSS_RELAY_TOKEN)
 
 
 def _fetch_toss_prices(client, symbols):
-    """client.get_prices 호출 + 모든 Toss 예외 격리. 반환 (prices_dict, error_name|None).
-    401 재발급은 toss.py 내부 1회 정책을 그대로 쓰고, 여기서 429 sleep·재시도는 하지 않는다.
+    """client.get_prices 호출 + 모든 Relay 예외 격리. 반환 (prices_dict, error_name|None).
+    Toss OAuth 재발급·429 정책은 Relay 서버 내부 소관 — 여기서 sleep·재시도는 하지 않는다.
     어떤 오류도 앱으로 전파하지 않고 빈 dict로 돌려 전체 batch를 DB fallback시킨다.
-    예외 메시지에는 secret/token이 없고(toss.py 계약), 로그도 타입명만 남긴다."""
+    예외 메시지에는 token/원본 응답이 없고(toss_relay_client 계약), 로그도 타입명만 남긴다."""
     if client is None or not symbols:
         return {}, None
-    from app import toss as toss_api            # lazy — 활성 경로 전용
+    from app import toss_relay_client as relay_api      # lazy — 활성 경로 전용
     try:
         return client.get_prices(list(symbols)), None
-    except toss_api.TossApiError as e:          # Auth/Forbidden/RateLimit/Timeout/Response 포함
+    except relay_api.TossRelayError as e:   # Auth/RateLimit/Timeout/Upstream/Response 포함
         _log_quote_error_once("toss_overlay", e)
         return {}, type(e).__name__
-    except Exception as e:                       # 예상 못한 오류도 앱 중단 방지
+    except Exception as e:                   # 예상 못한 오류도 앱 중단 방지
         _log_quote_error_once("toss_overlay", e)
         return {}, "TossUnexpected"
 
 
 @st.cache_data(ttl=20, show_spinner=False, max_entries=8)
 def _toss_overlay_raw(symbols_key: tuple):
-    """visible 심볼 batch를 Toss로 1회 조회(캐시 TTL 20초). 단순 widget rerun이 20초
-    이내면 이 캐시가 재사용돼 실제 API를 다시 호출하지 않는다. 반환 {prices, error}.
-    활성 경로 전용(_apply_toss_overlay에서만 호출)."""
+    """visible 심볼 batch를 Relay로 1회 조회(캐시 TTL 20초). 단순 widget rerun이 20초
+    이내면 이 캐시가 재사용돼 실제 HTTP 요청을 다시 보내지 않는다. 반환 {prices, error}.
+    활성 경로 전용(_apply_toss_overlay에서만 호출). token은 cache key에 포함되지 않는다."""
     prices, error = _fetch_toss_prices(_toss_client(), list(symbols_key))
     return {"prices": prices, "error": error}
 
@@ -1060,14 +1065,15 @@ def _toss_skew_caption(c: dict):
 
 
 def clear_price_caches():
-    """가격 새로고침: 계산용 가격 캐시만 초기화(가격 쌍·외부 조회·Toss batch 포함).
-    Toss client(=토큰 캐시)는 유지한다 — 토큰을 불필요하게 재발급하지 않는다. 다른 탭 무영향."""
+    """가격 새로고침: 계산용 가격 캐시만 초기화(가격 쌍·외부 조회·Relay batch 포함).
+    Relay client(+session)는 유지하고 Relay token도 그대로다 — Toss OAuth token은
+    Relay 서버 내부에서 유지되므로 Streamlit이 재발급을 유발하지 않는다. 다른 탭 무영향."""
     latest_price.clear()
     db_quote_pair.clear()
     db_single_quote.clear()
     fdr_quote_pair.clear()
     fdr_single_quote.clear()
-    _toss_overlay_raw.clear()         # Toss 가격 batch 캐시만 — 토큰(_toss_client)은 보존
+    _toss_overlay_raw.clear()         # Relay 가격 batch 캐시만 — client(_toss_client)는 보존
 
 
 def _ext_quote(record_id):
@@ -1555,8 +1561,8 @@ def render_trade_tab():
         _nm = stock_name_map()
         records = [x for x in records if trade_matches_query(x, tq, _nm)]
 
-    # Toss live overlay — 화면에 보이는 기록의 본주·ETF 심볼만 1회 batch 조회(캐시 20초).
-    # credentials 미설정이면 게이트에서 즉시 통과(어떤 Toss 경로도 실행하지 않음).
+    # Toss live overlay(Relay 경유) — 화면에 보이는 기록의 본주·ETF 심볼만 1회 batch
+    # 조회(캐시 20초). Relay 설정 미입력이면 게이트에서 즉시 통과(어떤 경로도 실행 없음).
     # 실패 시 기존 DB 가격으로 조용히 fallback한다(카드별 반복 경고 없음).
     _maybe_apply_toss_overlay(records or [])
 
