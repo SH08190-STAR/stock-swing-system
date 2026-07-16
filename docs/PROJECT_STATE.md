@@ -1,27 +1,33 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-15, main=3997bb6. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-17, main=4787186. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `3997bb6` feat: add Toss API client foundation (2026-07-15)
-- app/toss.py(토큰 관리 + /api/v1/prices batch 순수 모듈) + tests/test_toss.py.
-  dashboard 미연결·credentials 미입력 — 운영 실행 경로 무영향.
-- staging/ui-v3 = `e25046e` fix: bypass Toss overlay when disabled (fix 1).
+- `4787186` fix: restrict Toss relay overlay to US trades (2026-07-17 운영 배포)
+- main = staging/ui-v3 = `4787186` (fast-forward, merge commit 없음).
+- 토스 시세 Relay 연동 전체가 운영 반영된 상태 — 아래 "토스 Relay 운영" 참조.
 
 ## LAST_KNOWN_GOOD_COMMIT
-- `39b8c95` feat: improve card hierarchy and semantic feedback (2026-07-15 갱신)
-- 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.**
-  (main HEAD는 이후 3997bb6로 전진 — toss foundation은 운영 실행 경로 무영향.)
-- 근거: UI/UX 3D — dashboard/app.py 표시 계층만 변경(카드 표면 CSS·시맨틱색 helper·
-  앰버 경고 영역), 계산·DB·내비게이션·모바일 카드 CSS 무변경,
-  requirements/schema/CSV/workflow 무변경. GitHub Tests·Deploy Smoke Check 성공 +
-  운영 앱 실화면 정상(사용자 확인, 2026-07-15) — 3D 운영 검증 완료. pytest 185 passed.
-- 이전 LKG `67ec9c9`(3C)에서 갱신: 갱신 조건(배포 + smoke 통과 + 운영 실화면 확인) 충족.
+- `4787186` fix: restrict Toss relay overlay to US trades (**2026-07-17 갱신**)
+- 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
+- 근거: main FF 후 GitHub checks 6건 전부 success(pytest·relay-tests·
+  docker-build-health·smoke), Production 4분 smoke PASS(검사 16회·실패 0·303→200),
+  **운영 실화면 사용자 확인(2026-07-17)** — 국장 우회 정상, 미장 TP IN·진입 provider
+  Toss, 상태 탭 왕복·최신 가격 조회 정상, Relay POST 4건 전부 200, 오류 status 0,
+  AttributeError·traceback·segfault 0. 전체 pytest 363 passed.
+- 이전 LKG `39b8c95`(UI/UX 3D)에서 갱신: 갱신 조건(배포 + smoke 통과 +
+  운영 실화면 확인) 충족. `39b8c95`는 **historical rollback reference로 유지**.
 - 참고: `a2e9a0e`는 "상태 스냅샷 작성 기준 커밋"으로 LKG와 별개다.
 - 갱신 규칙: 배포 후 smoke check + 안정 확인 + 운영 실화면 확인 시에만 갱신
+
+## 릴리스 tag (rollback 기준)
+- `prod-toss-relay-live-20260717` → **`4787186`** — 현재 운영 릴리스(Toss Relay live).
+- `prod-pre-toss-relay-20260716` → **`3997bb6`** — Toss Relay 도입 직전 main(rollback 기준).
+- `39b8c95` — historical operational LKG(UI/UX 3D 시점).
+- tag는 수정·삭제하지 않는다. rollback 시 위 tag를 기준으로 판단한다.
 
 ## UI/UX 진행 상태
 - 3A(전역 config.toml 라이트 테마): **폐기** — 스테이징 Segmentation fault 재현.
@@ -31,7 +37,73 @@
 - 3D(카드 정보 위계·경고·손익 표현): **운영 검증 완료** (`39b8c95`, 2026-07-15).
 - **UI/UX 3단계(3B~3D) 전체 완료.** 3A(전역 config.toml)만 폐기 유지.
 
-## 진행 중 — 토스증권 Open API 실시간 가격 연동
+## 토스 Relay 운영 — **완료 (2026-07-17 운영 배포·검증 완료)**
+
+### 최종 아키텍처
+```
+Streamlit Cloud ──HTTPS──▶ Fly.io Relay (nrt, static egress IPv4 1개)
+  (TOSS_RELAY_URL/TOKEN)         └──▶ Toss Open API (허용 IP = 그 egress IPv4 1개)
+```
+- 배경: Streamlit Cloud outbound IP가 토스 허용 한도(10개)를 초과해 **직접 호출
+  구조는 폐기**. 고정 egress IP를 가진 Relay 1대를 경유한다.
+- Relay: `services/toss_relay/`(FastAPI) — Fly app nrt / shared-cpu-1x 256MB /
+  **Machine 최대 1대** / uvicorn worker 1 / app-scoped static egress IPv4 1쌍.
+  공개 endpoint는 `GET /healthz`·`POST /v1/prices` **2개뿐**(주문·계좌·잔고 없음).
+  실제 앱 이름·URL·egress IPv4는 tracked 파일에 기록하지 않는다(로컬
+  `services/toss_relay/fly.toml`(.gitignore)·Fly 대시보드 참조).
+
+### 보안 경계
+- **Streamlit**: `TOSS_RELAY_URL`, `TOSS_RELAY_TOKEN` **두 개만**. Toss OAuth를
+  직접 다루지 않으며 access token을 보지 않는다.
+- **Fly Relay**: `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `RELAY_SHARED_SECRET`.
+  **Toss credentials는 Relay에만 존재** — Streamlit에 절대 넣지 않는다.
+- Relay 인증: `Authorization: Bearer`(hmac.compare_digest, 최소 32자). 오류 응답은
+  code + 고정 문구만(원본 body·token 비노출). CORS 없음, docs/openapi 비활성.
+
+### 시장 정책 (US-only)
+- **US 화면만 Relay 활성** — `dashboard/app.py`의 market gate가 canonical `"US"`가
+  아니면(KR·미지정·미지 값 포함, fail-closed) `toss_enabled()` 검사 전에 우회한다.
+- **KR(국장)은 기존 Supabase/FDR 경로 유지** — Relay 호출 0회, 실패 안내 0회.
+- 이유: KR 심볼(숫자 코드 + 한글 종목명)의 Toss 지원 형식이 **미검증**(실호출 502).
+  KR 활성화는 **별도 검증 없이는 금지**.
+
+### 부분 반환 정책 (`app/toss.py`)
+- 200 응답의 **개별 item 불량**(null/0/음수/비숫자 가격·timestamp 누락/파싱불가/
+  naive·symbol 누락·비dict)은 **그 item만 skip**하고 정상 item은 반환.
+  누락 심볼은 결과에 넣지 않아 호출측이 pair 단위 DB fallback을 한다(placeholder 금지).
+- 빈 result 목록 → 정상 빈 결과. **항목이 있는데 전부 불량 → TossResponseError**
+  (Relay 502 `TOSS_BAD_RESPONSE`) — 전체 손상을 숨기지 않는다.
+- HTTP/upstream 오류(401/403/404/429/5xx/timeout) 매핑은 무변경. 자동 retry·
+  bisect·negative cache·심볼 whitelist·특정 티커 예외 처리 **없음**.
+
+### 가격 우선순위·캐시
+- 우선순위(`_trade_calc` 한곳): 수동 외부조회(`_ext_quote`) → **Relay Toss** →
+  Supabase DB(공통일자 pair/최신 quote) → FDR(수동 버튼).
+- 레버리지 쌍은 본주·ETF **둘 다 Toss + 기준시각 차이 ≤300초**일 때만 성립.
+  한쪽 누락·skew 초과·오류 시 **쌍 전체 DB fallback**(출처 혼합 금지).
+- Relay client는 `st.cache_resource`(프로세스 1개), 가격 batch는
+  `st.cache_data(ttl=20)`(심볼 튜플 키 — token은 인자·key·session_state에 없음).
+  새로고침은 batch 캐시만 clear(client·token 유지, Toss OAuth는 Relay 내부 소관).
+
+### 운영 검증 결과 (2026-07-17)
+- Production: Relay POST **4건 전부 HTTP 200**, 오류 status(401/429/502/503/504) **0**,
+  `TOSS_AUTH_FAILED`·`TOSS_IP_FORBIDDEN` **0**, AttributeError·traceback·segfault **0**,
+  secret/token 로그 노출 **0**. 국장 대응 POST **0회**(gate 정상), 미장 TP IN·진입
+  provider **Toss**, 상태 탭 왕복·최신 가격 조회 정상. 4분 smoke 16회·실패 0.
+- 20초 TTL 캐시가 동일 batch 반복을 정상 억제(탭 8~12회 전환 대비 POST 4건).
+- Fly Relay version 4 / Machine 1대 / nrt / started / health passing / restart 0.
+- DB write 없음(Relay는 DB 미연결, 대시보드는 읽기 전용 경로만 사용).
+
+### 미해결 항목
+- **KR Toss 지원**: 별도 검증 필요(현재 의도적 비활성). 숫자 코드·한글 종목명이
+  섞여 나가는 문제와 Toss의 KR 심볼 포맷 확인이 선행돼야 한다.
+- **과거 native segfault 근본 원인 미확정**: 0161184 staging 사건은 fix 1(e25046e)의
+  비활성 우회로 격리했을 뿐 원인 라인은 미확정. 현재 재현 없음.
+- **비용**: Relay 월 약 **$5.6**(Machine ~$2 + static egress IPv4 $3.60 + 데이터 ~$0).
+- 운영 정책: static egress IP **release 금지**, Machine **최대 1대**(토스는 클라이언트당
+  활성 토큰 1개 — 2대면 토큰 상호 무효화), 주문·계좌 endpoint 추가는 별도 승인 필요.
+
+## 이력 — 토스증권 Open API 연동 경과
 - 목표: Toss Open API로 본주·레버리지 ETF 현재가를 화면 표시용 overlay로 반영
   (Supabase 최신 종가는 fallback·과거 데이터로 유지, DB 틱 저장 없음).
 - **1차 foundation 완료**(main=3997bb6): `app/toss.py`(토큰 관리 + `/api/v1/prices`
@@ -61,16 +133,15 @@
   secret/token 로그 비노출, restart 0. 운영 비용 약 $5.6/월(Machine ~$2 +
   egress IP $3.60). 실제 services/toss_relay/fly.toml은 로컬 전용(.gitignore) —
   dockerfile 경로는 fly.toml 위치 기준 "Dockerfile"이 검증값(example에 반영).
-- **Streamlit 연동 진행 중**(브랜치 feature/toss-relay-streamlit-integration,
-  commit 전): 직접 Toss 호출 경로 제거 — app/toss_relay_client.py(신규 순수
-  클라이언트) + config TOSS_RELAY_URL/TOSS_RELAY_TOKEN + dashboard _toss_client
-  교체. Fix 1 비활성 우회 계약 유지. 전체 pytest 338 passed(신규 41 포함).
-  **Streamlit Secrets 미입력 — 아직 운영 연동 전.** 상세: CURRENT_TASK.md.
-- 운영 정책: Toss credentials는 Relay(Fly secrets)에만 존재, Streamlit에는
-  TOSS_RELAY_URL/TOSS_RELAY_TOKEN만. 토스는 클라이언트당 활성 토큰 1개
-  (재발급 시 이전 토큰 무효) → Relay Machine 최대 1대·worker 1개,
-  static egress IP release 금지. 우선순위(_trade_calc 한곳):
-  수동 외부조회 → Relay Toss → Supabase DB.
+- **Streamlit 연동 완료**(`007a7d8`): 직접 Toss 호출 경로 제거 —
+  app/toss_relay_client.py(순수 클라이언트) + config TOSS_RELAY_URL/TOSS_RELAY_TOKEN
+  + dashboard `_toss_client` 교체. Fix 1 비활성 우회 계약 유지.
+- **부분 반환 견고화**(`9d60937`): 일시 데이터 지연 종목 1개가 batch 전체를 502로
+  만들던 all-or-nothing 파싱을 per-item skip으로 교체. Fly Relay version 4로 배포.
+- **US-only gate**(`4787186`): KR batch(숫자 코드 + 한글 종목명)가 Relay로 나가
+  502 + 실패 안내가 뜨던 문제를 market gate로 차단. Streamlit 전용 변경.
+- **운영 배포 완료**(2026-07-17): main FF `3997bb6`→`4787186`, LKG 갱신.
+  현재 정책·검증 결과는 위 "토스 Relay 운영" 섹션 참조.
 
 ## deploy-smoke 실전 검증 이력
 - 2026-07-13: deploy-smoke workflow **최초 실전 검증 성공** (commit f40ba07,
@@ -202,18 +273,12 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
 - staging segfault 사건(2026-07-15): 0161184 배포 상태에서 매매→미장→TP IN 재현,
   revert 59144b1로 격리 후 정상. 원인 라인 미확정 — fix 1(e25046e)로 비활성 경로
   우회, 스테이징 검증 성공.
-- Streamlit→Relay 연동: **staging 배포 완료**(staging/ui-v3=007a7d8, FF,
-  GitHub 3 checks success, smoke 16회/실패 0). staging Relay Secrets 입력 후
-  활성 경로에서 502 3건 → 진단으로 원인 확정: 일시 데이터 지연 종목의 불량
-  item 1개가 foundation all-or-nothing 파싱으로 batch 전체 실패(인증/IP 정상,
-  동일 batch 이후 200).
-- 부분 반환 견고화: **완료·배포됨**(9d60937, staging FF, Fly Relay version 4,
-  배포 후 TP IN batch 실조회 200 4/4). staging 활성 경로 실검증: US TP IN·
-  US 진입 provider Toss 정상, **국장 진입은 Relay 502 + fallback 안내** —
-  KR batch(숫자 코드+한글 종목명)가 market 필터 없이 Relay로 전송된 것이 원인
-  (KR Toss 지원 형식 미검증, 로그 10:28 200/200 → 10:29 502).
-- 미push 로컬 변경: US-only gate(feature/toss-relay-us-only —
-  dashboard/app.py market gate + tests/test_toss_overlay.py 10건, +119/−10) —
-  KR·미지 시장은 fail-closed 우회(호출·안내 0), US 계약 무변경. 로컬 검증
-  완료(전체 363 passed), commit·push 승인 대기. **Streamlit 전용 —
-  Fly 재배포 불필요.** KR Toss 활성화는 별도 검증 없이는 금지.
+- 토스 Relay 연동: **운영 배포·검증 완료**(main=LKG=`4787186`, 2026-07-17).
+  경과의 두 사건은 모두 해결됨 — ①staging 활성 직후 502 3건: 일시 데이터 지연
+  종목의 불량 item 1개가 all-or-nothing 파싱으로 batch 전체를 실패시킨 것
+  → `9d60937` per-item skip으로 해결(Fly Relay version 4 배포). ②국장 진입 502 +
+  안내: KR batch가 market 필터 없이 Relay로 전송된 것 → `4787186` US-only gate로
+  차단. 현재 정책·검증 결과는 "토스 Relay 운영" 섹션 참조.
+- **KR Toss 지원은 의도적 비활성** — 숫자 코드·한글 종목명 혼재와 Toss의 KR 심볼
+  포맷이 미검증. 별도 검증 단계 없이 활성화 금지.
+- 미push 로컬 변경: 없음 (main·staging 모두 `4787186`, 작업 트리 clean).
