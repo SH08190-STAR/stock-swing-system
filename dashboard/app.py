@@ -978,6 +978,13 @@ def fdr_single_quote(symbol: str):
 # app.toss_relay_client import(→requests)를 일절 실행하지 않는다(3997bb6 동일 경로).
 # cache_resource에 None을 저장하지 않고, relay client는 활성 경로에서만 lazy import한다.
 # token은 cache 인자·cache key·session_state 어디에도 넣지 않는다.
+#
+# US-only gate: Toss Relay 실검증 범위는 미국 본주·미국 레버리지 ETF뿐이다.
+# KR 심볼(숫자 코드·한글 종목명)의 Toss 지원 형식은 미검증(staging 실호출 502)
+# 이므로, market_group이 "US"가 아니면(미지정·미지의 값 포함, fail-closed)
+# 설정 검사·심볼 수집·Relay 호출·안내 표시 전부를 우회한다 — KR 화면은 기존
+# Supabase/FDR 경로만 사용하고 Relay 실패 안내도 표시하지 않는다.
+TOSS_RELAY_MARKET = "US"              # Relay 활성 허용 시장 (canonical 값)
 TOSS_MAX_SKEW_SEC = 300               # 본주·ETF 기준시각 허용 차이(5분)
 _TOSS_OVERLAY_KEY = "_toss_overlay"   # 현재 rerun의 {symbol: TossPrice} (session_state)
 
@@ -1035,10 +1042,16 @@ def _toss_overlay_state() -> dict:
         return {}
 
 
-def _maybe_apply_toss_overlay(records) -> bool:
+def _maybe_apply_toss_overlay(records, market_group=None) -> bool:
     """Toss 게이트 단일 지점(render_trade_tab에서 호출). 비활성이면 False만 반환하고
     session_state 생성·심볼 수집·cache 접근·client 생성·import 등 어떤 Toss 경로도
-    실행하지 않는다. 활성이면 _apply_toss_overlay 실행 후 True."""
+    실행하지 않는다. 활성이면 _apply_toss_overlay 실행 후 True.
+
+    market gate가 최우선(fail-closed): market_group이 "US"가 아니면(미지정·미지의
+    값 포함) toss_enabled 검사조차 하지 않고 즉시 우회 — KR 숫자 코드·한글 종목명이
+    Relay payload로 나가는 경로와 KR 화면의 실패 안내를 원천 차단한다."""
+    if market_group != TOSS_RELAY_MARKET:
+        return False
     if not toss_enabled():
         return False
     _apply_toss_overlay(records)
@@ -1562,9 +1575,10 @@ def render_trade_tab():
         records = [x for x in records if trade_matches_query(x, tq, _nm)]
 
     # Toss live overlay(Relay 경유) — 화면에 보이는 기록의 본주·ETF 심볼만 1회 batch
-    # 조회(캐시 20초). Relay 설정 미입력이면 게이트에서 즉시 통과(어떤 경로도 실행 없음).
+    # 조회(캐시 20초). US 화면 + Relay 설정 존재일 때만 실행 — KR(국장)·설정 미입력은
+    # 게이트에서 즉시 통과(어떤 경로도 실행 없음, 안내도 없음).
     # 실패 시 기존 DB 가격으로 조용히 fallback한다(카드별 반복 경고 없음).
-    _maybe_apply_toss_overlay(records or [])
+    _maybe_apply_toss_overlay(records or [], market_group)
 
     # 기록 카드 목록 (모바일 가독성 — 표 대신 카드 + 상세 expander)
     if records:

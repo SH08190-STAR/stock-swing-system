@@ -6,40 +6,37 @@
 ## 상태
 검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 목표 — Toss 가격 응답 부분 반환 견고화 (foundation per-item skip)
-> 배경: staging Relay 활성 직후 미장 TP IN batch에서 502 3건 관측(07:22~07:23Z).
-> 진단 결과 credentials/OAuth/IP/Relay 인증 정상, 동일 batch가 이후 200 —
-> 원인은 일시적 데이터 지연 종목(소형 레버리지 ETF)의 불량 item 1개가
-> app/toss.py의 all-or-nothing 파싱으로 batch 전체를 TossResponseError
-> (→Relay 502 TOSS_BAD_RESPONSE)로 만든 구조.
+## 목표 — Toss Relay US-only gate (국장 화면 Relay 호출 차단)
+> 배경: staging 활성 경로 실검증에서 US TP IN·US 진입은 provider Toss 정상,
+> 국장(진입) 화면은 Relay 502 + fallback 안내 표시. 원인: 게이트에 market 필터가
+> 없어 KR batch(숫자 코드 5개 + **한글 종목명 4개**)가 그대로 Relay→Toss로
+> 전송됨. KR Toss 지원 형식은 미검증 — 정책: US만 활성, KR·미지의 시장은
+> fail-closed 우회(기존 Supabase/FDR 유지, 실패 안내도 미표시).
 
-- 브랜치: feature/toss-relay-partial-results (기준 staging/ui-v3=007a7d8)
-- 변경(3파일, +127/−11):
-  - app/toss.py — _parse_price_items를 item 단위 격리(_parse_one_price_item):
-    컨테이너 오류(JSON·result 형식)는 기존 TossResponseError 유지, 개별 item
-    불량(비dict·symbol 누락·null/0/음수/비숫자 가격·timestamp 누락/파싱불가/naive)
-    은 그 item만 skip하고 정상 item 반환. 빈 result는 정상 {}. 항목이 있는데
-    유효 0개면 TossResponseError(전체 손상 은폐 금지). HTTP/upstream 오류
-    (401/403/404/429/5xx/timeout/OAuth/IP) 매핑은 전부 무변경.
-  - tests/test_toss.py — 부분 반환 12건 추가(불량 유형 9종 parametrize·
-    정상 2+불량 1·빈 result·전부 불량 raise·Decimal/개별 timestamp 보존·
-    원본 값/secret 비노출). 기존 25건 계약 유지.
-  - tests/test_toss_relay.py — 3건 추가(부분 dict → 200 + placeholder 없음·
-    빈 dict → 200 빈 prices·전부 불량 → 502 TOSS_BAD_RESPONSE 유지).
-- 무변경: Relay main/config·toss_relay_client·toss_overlay·dashboard·
-  requirements·Dockerfile·workflows·Relay API schema·오류 매핑·DB fallback.
-- 금지 준수: 심볼별 재호출·bisect·retry·sleep·negative cache·whitelist·
-  특정 티커 예외 처리 없음.
+- 브랜치: feature/toss-relay-us-only (기준 staging/ui-v3=9d60937)
+- 변경(2파일, +119/−10):
+  - dashboard/app.py — `TOSS_RELAY_MARKET="US"` 상수 +
+    `_maybe_apply_toss_overlay(records, market_group)` 시그니처 확장.
+    **market gate가 최우선**(toss_enabled 검사·심볼 수집·cache·lazy import·
+    session_state·안내보다 먼저): `market_group != "US"`면(미지정·미지 값 포함)
+    즉시 False. 호출부(render_trade_tab)가 market_group 전달. US 활성 로직·
+    cache key·오류 처리·우선순위는 무변경.
+  - tests/test_toss_overlay.py — 신규 10건(KR+설정존재 시 전 경로 0회·한글/숫자
+    심볼 payload 차단·비정규 시장 6종 fail-closed·KR lazy import 0·US↔KR 전환
+    격리·stale US overlay에도 KR 계산은 DB 경로). 기존 게이트 테스트 3곳은
+    "US" 명시로 갱신(계약 유지).
+- 무변경: app/toss.py·toss_relay_client·toss_overlay·config·relay 서버·
+  database·기존 toss/relay 테스트·requirements·Dockerfile·workflows.
+  KR ticker 변환·whitelist·특정 종목명 예외 처리 없음.
+- 배포 특성: **Streamlit 전용 변경 — Fly Relay 재배포 불필요**(staging push만).
 
 ## 검증 결과 (로컬, 2026-07-16)
-- py_compile OK. toss 4개 파일 168 passed. 전체 pytest **353 passed**
-  (직전 338 + 신규 15, .tmp/pytest.log). 회귀 0. git diff --check clean.
-- 실제 Relay/Toss 네트워크 0회(전부 FakeSession/FakeTossClient)·DB 접근 0회.
-- 배포 필요: 이 수정은 Relay 이미지에 포함되는 app/toss.py이므로
-  **commit·push 후 Fly Relay 재배포가 있어야 운영에 반영**된다(승인 대기).
+- py_compile OK. toss 4개 파일 178 passed(기존 168 + 신규 10).
+- 전체 pytest **363 passed**(직전 353 + 10, .tmp/pytest.log). 회귀 0.
+- git diff --check clean. 실 네트워크·DB 접근 0회.
 
 ## DB write 허용 여부
 아니오 (읽기 전용 — DB 접근 없음)
 
 ## push 허용 여부
-아니오 (commit·push·Fly deploy 금지 — 사용자 승인 대기)
+아니오 (commit·push 금지 — 사용자 승인 대기)

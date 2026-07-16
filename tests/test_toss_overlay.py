@@ -195,9 +195,9 @@ def test_disabled_gate_runs_no_toss_paths(monkeypatch, url, token):
     m.st.session_state["_fix1_sentinel"] = "keep"
     filters = ([],
                [{"market_group": "US", "symbol": "NVDA", "leverage_symbol": "NVDL"}],
-               [{"market_group": "KR", "symbol": "005490", "leverage_symbol": ""}])
-    for recs in filters:                       # 필터 변경 3회 시뮬레이션
-        assert m._maybe_apply_toss_overlay(recs) is False
+               [{"market_group": "US", "symbol": "TSLA", "leverage_symbol": "TSLL"}])
+    for recs in filters:                       # 필터 변경 3회 시뮬레이션 (US 화면 기준)
+        assert m._maybe_apply_toss_overlay(recs, "US") is False
     assert calls == []                          # Toss 함수·수집·안내 호출 0회
     assert m._TOSS_OVERLAY_KEY not in m.st.session_state   # Toss key 생성 0
     assert m.st.session_state.get("_fix1_sentinel") == "keep"  # 기존 값 무변경
@@ -246,7 +246,8 @@ def test_dashboard_load_and_disabled_run_without_relay_import(monkeypatch):
         _set_creds(m, monkeypatch, "", "")
         _pop_overlay_key(m)
         assert m._maybe_apply_toss_overlay(
-            [{"market_group": "US", "symbol": "NVDA", "leverage_symbol": "NVDL"}]) is False
+            [{"market_group": "US", "symbol": "NVDA", "leverage_symbol": "NVDL"}],
+            "US") is False
         monkeypatch.setattr(m, "_ext_quote", lambda rid: None)
         monkeypatch.setattr(m, "_resolve_symbol", lambda s, mg=None: str(s or "").upper())
         monkeypatch.setattr(m, "db_single_quote", lambda s: None)
@@ -262,13 +263,107 @@ def test_dashboard_load_and_disabled_run_without_relay_import(monkeypatch):
 
 
 def test_enabled_gate_calls_apply_once(monkeypatch):
-    """활성: 게이트가 _apply_toss_overlay를 정확히 1회 호출."""
+    """활성(US + 설정 존재): 게이트가 _apply_toss_overlay를 정확히 1회 호출."""
     m = _dash()
     _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
     called = []
     monkeypatch.setattr(m, "_apply_toss_overlay", lambda recs: called.append(list(recs)))
-    assert m._maybe_apply_toss_overlay([{"symbol": "NVDA"}]) is True
+    assert m._maybe_apply_toss_overlay([{"symbol": "NVDA"}], "US") is True
     assert len(called) == 1
+
+
+# ── US-only market gate: KR(국장)·미지의 시장은 Relay 완전 우회 ──
+def test_kr_gate_bypasses_all_relay_paths_even_when_configured(monkeypatch):
+    """KR + Relay 설정 존재 → market gate가 최우선: toss_enabled 검사·client·
+    batch·심볼 수집·안내 전부 0회. session_state Toss key 미생성, 기존 key 무변경.
+    KR 숫자 코드·한글 종목명이 Relay payload로 나갈 경로 자체가 없다."""
+    m = _dash()
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)   # 설정은 존재
+    _pop_overlay_key(m)
+    calls = []
+    monkeypatch.setattr(m, "toss_enabled", _spy(calls, "enabled", True))
+    monkeypatch.setattr(m, "_toss_client", _spy(calls, "client"))
+    monkeypatch.setattr(m, "_toss_overlay_raw",
+                        _spy(calls, "raw", {"prices": {}, "error": None}))
+    monkeypatch.setattr(m, "_apply_toss_overlay", _spy(calls, "apply"))
+    monkeypatch.setattr(m.tov, "collect_visible_symbols", _spy(calls, "collect", []))
+    monkeypatch.setattr(m.st, "info", _spy(calls, "info"))
+    m.st.session_state["_uskr_sentinel"] = "keep"
+    kr_records = [
+        {"market_group": "KR", "symbol": "108490", "leverage_symbol": ""},
+        {"market_group": "KR", "symbol": "에코프로", "leverage_symbol": None},
+        {"market_group": "KR", "symbol": "005490", "leverage_symbol": "46X910"},
+    ]
+    for _ in range(3):                        # rerun 반복에도 동일
+        assert m._maybe_apply_toss_overlay(kr_records, "KR") is False
+    assert calls == []                        # toss_enabled조차 호출 안 됨
+    assert m._TOSS_OVERLAY_KEY not in m.st.session_state
+    assert m.st.session_state.get("_uskr_sentinel") == "keep"
+    m.st.session_state.pop("_uskr_sentinel", None)
+
+
+@pytest.mark.parametrize("mg", [None, "", "KR", "JP", "kr", "us"])
+def test_non_canonical_market_fail_closed(monkeypatch, mg):
+    """US canonical 값("US")만 허용 — 미지정·빈 값·소문자·미지의 시장은 전부 차단."""
+    m = _dash()
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
+    called = []
+    monkeypatch.setattr(m, "_apply_toss_overlay", lambda recs: called.append(1))
+    monkeypatch.setattr(m.st, "info",
+                        lambda *a, **k: pytest.fail("우회 시 안내 표시 금지"))
+    assert m._maybe_apply_toss_overlay([{"symbol": "NVDA"}], mg) is False
+    assert called == []
+
+
+def test_kr_run_without_relay_import(monkeypatch):
+    """KR 화면 실행(설정 존재)이 app.toss_relay_client import를 요구하지 않는다."""
+    import sys
+    saved = sys.modules.pop("app.toss_relay_client", None)
+    try:
+        m = _dash()
+        _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
+        _pop_overlay_key(m)
+        assert m._maybe_apply_toss_overlay(
+            [{"market_group": "KR", "symbol": "현대차", "leverage_symbol": ""}],
+            "KR") is False
+        assert "app.toss_relay_client" not in sys.modules
+    finally:
+        if saved is not None:
+            sys.modules["app.toss_relay_client"] = saved
+
+
+def test_market_switch_isolation(monkeypatch):
+    """US(활성) → KR(우회) → US(활성) 전환: KR가 추가 Relay 호출·오류 안내를
+    만들지 않고, US 활성 경로는 그대로 동작한다."""
+    m = _dash()
+    _set_creds(m, monkeypatch, FAKE_RELAY_URL, FAKE_RELAY_TOKEN)
+    _pop_overlay_key(m)
+    applied = []
+    monkeypatch.setattr(m, "_apply_toss_overlay", lambda recs: applied.append(list(recs)))
+    monkeypatch.setattr(m.st, "info",
+                        lambda *a, **k: pytest.fail("KR 전환 시 안내 표시 금지"))
+    us = [{"market_group": "US", "symbol": "NVDA", "leverage_symbol": "NVDL"}]
+    kr = [{"market_group": "KR", "symbol": "108490", "leverage_symbol": ""}]
+    assert m._maybe_apply_toss_overlay(us, "US") is True
+    assert m._maybe_apply_toss_overlay(kr, "KR") is False
+    assert m._maybe_apply_toss_overlay(us, "US") is True
+    assert len(applied) == 2                  # US 2회만 — KR 0회
+
+
+def test_kr_trade_calc_uses_db_even_with_stale_us_overlay(monkeypatch):
+    """세션에 US overlay가 남아 있어도 KR 카드 계산은 심볼 불일치로 DB 경로
+    (기존 Supabase pair) 그대로 — KR 화면에 US 오류·가격 상태가 전이되지 않는다."""
+    m = _dash()
+    overlay = {"NVDA": tprice("NVDA", "182.7", "2026-07-15T02:30:00+00:00", "USD")}
+    monkeypatch.setattr(m, "_toss_overlay_state", lambda: overlay)   # US 잔존 흉내
+    _no_ext(m, monkeypatch)
+    dbpair = m.qt.make_pair(m.qt.QuoteSnapshot("005490", 300000.0, "Supabase", "2026-07-10"),
+                            m.qt.QuoteSnapshot("46X910", 12000.0, "Supabase", "2026-07-10"))
+    monkeypatch.setattr(m, "db_quote_pair", lambda a, b: dbpair)
+    c = m._trade_calc({"id": "k", "market_group": "KR", "symbol": "005490",
+                       "leverage_symbol": "46X910", "entry1": 330000.0,
+                       "stop": 285000.0, "risk1": 700.0})
+    assert c["provider"] == "Supabase" and c["consistent"] is True
 
 
 def test_toss_client_never_caches_none(monkeypatch):

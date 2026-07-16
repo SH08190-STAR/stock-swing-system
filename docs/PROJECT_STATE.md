@@ -207,6 +207,13 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
   활성 경로에서 502 3건 → 진단으로 원인 확정: 일시 데이터 지연 종목의 불량
   item 1개가 foundation all-or-nothing 파싱으로 batch 전체 실패(인증/IP 정상,
   동일 batch 이후 200).
-- 미push 로컬 변경: 부분 반환 견고화(feature/toss-relay-partial-results —
-  app/toss.py per-item skip + tests 15건, 3파일 +127/−11) — 로컬 검증 완료
-  (전체 353 passed), commit·push·**Fly Relay 재배포** 승인 대기.
+- 부분 반환 견고화: **완료·배포됨**(9d60937, staging FF, Fly Relay version 4,
+  배포 후 TP IN batch 실조회 200 4/4). staging 활성 경로 실검증: US TP IN·
+  US 진입 provider Toss 정상, **국장 진입은 Relay 502 + fallback 안내** —
+  KR batch(숫자 코드+한글 종목명)가 market 필터 없이 Relay로 전송된 것이 원인
+  (KR Toss 지원 형식 미검증, 로그 10:28 200/200 → 10:29 502).
+- 미push 로컬 변경: US-only gate(feature/toss-relay-us-only —
+  dashboard/app.py market gate + tests/test_toss_overlay.py 10건, +119/−10) —
+  KR·미지 시장은 fail-closed 우회(호출·안내 0), US 계약 무변경. 로컬 검증
+  완료(전체 363 passed), commit·push 승인 대기. **Streamlit 전용 —
+  Fly 재배포 불필요.** KR Toss 활성화는 별도 검증 없이는 금지.
