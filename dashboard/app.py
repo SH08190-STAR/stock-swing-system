@@ -36,6 +36,7 @@ from app import database as db
 from app import quotes as qt
 from app import watchlist as wl
 from app import toss_overlay as tov   # 순수 모듈(quotes만 의존) — relay client는 lazy import
+from app import auth_session as auths  # 순수 모듈(stdlib만) — 30일 로그인 토큰
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
 
@@ -157,20 +158,143 @@ _MOBILE_CARD_CSS = """<style>
 </style>"""
 
 
-# ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
+# ── 매매 카드 요약행(접힘형) CSS ─────────────────────────────
+# 적용 범위: key="tr_sum_*" 버튼만([class*=st-key-tr_sum_] 속성 선택자 — 기존
+# 카드 CSS와 동일 방식, private API·:has·nth-child 미사용). 목록형 가독성을 위해
+# 좌측 정렬·줄바꿈 허용(좁은 폭에서 정보 누락 대신 줄바꿈).
+_TRADE_SUMMARY_CSS = """<style>
+[class*="st-key-tr_sum_"] button {
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+  padding: 0.25rem 0.1rem;
+}
+[class*="st-key-tr_sum_"] button p {
+  white-space: normal;
+  word-break: keep-all;
+  line-height: 1.5;
+}
+</style>"""
+
+
+# ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) + 30일 로그인 유지 ─────────
+# 구조: session_state["authed"]가 1차. Streamlit 세션이 재생성되면(새로고침·모바일
+# Safari 탭 복귀) st.context.cookies의 서명 토큰(auth_session)으로 복원한다.
+# cookie 쓰기/삭제는 auth_session의 st.components.v2 component가 수행하고
+# (동적 값은 data로만 전달, JS가 재검증), 완료는 setTriggerValue("completed")
+# 콜백으로 수신한다. 비밀번호·secret은 브라우저에 저장하지 않는다.
+# 모든 버튼·완료 콜백은 st.rerun()을 직접 부르지 않는다(위젯 이벤트의 자연
+# rerun만 사용 — 완료 이벤트당 최대 1회, 무한 rerun 없음).
+_AUTH_COOKIE_PENDING = "_auth_cookie_pending"           # 발급 대기 토큰(set 완료 시 정리)
+_AUTH_COOKIE_DELETE_PENDING = "_auth_cookie_delete_pending"  # 삭제 대기(완료 시 정리)
+_AUTH_COOKIE_DELETE_DONE = "_auth_cookie_delete_done"   # 이 세션에서 삭제 완료 — 재마운트 차단
+_AUTH_LOGGED_OUT = "_auth_logged_out"                   # 로그아웃한 세션 — cookie 복원 차단
+_AUTH_LOGIN_FAILED = "_auth_login_failed"
+
+
+def _auth_key():
+    """토큰 서명키. secret 미설정·32바이트 미만이면 None → 30일 유지만 비활성."""
+    try:
+        return auths.derive_key(config.APP_SESSION_SECRET, config.APP_PASSWORD)
+    except Exception:
+        return None
+
+
+def _auth_cookie_raw():
+    """현재 요청의 세션 cookie 값(없으면 None). bare mode 등 context 부재 시 안전."""
+    try:
+        return (st.context.cookies or {}).get(auths.COOKIE_NAME)
+    except Exception:
+        return None
+
+
+def _on_cookie_set_done():
+    """set 완료 신호 — pending 토큰 정리(중복 수신에도 idempotent). rerun 호출 없음."""
+    st.session_state.pop(_AUTH_COOKIE_PENDING, None)
+
+
+def _on_cookie_delete_done():
+    """delete 완료 신호 — pending 정리 + done 마커(중복 수신에도 idempotent).
+    done 마커는 완료 후 재마운트→재신호 루프를 구조적으로 차단한다. rerun 호출 없음."""
+    st.session_state.pop(_AUTH_COOKIE_DELETE_PENDING, None)
+    st.session_state[_AUTH_COOKIE_DELETE_DONE] = True
+
+
+def _begin_logout():
+    """로그아웃 버튼 콜백(2단계 로그아웃의 1단계) — 인증 해제 + 삭제 pending 기록만.
+    st.rerun()을 직접 부르지 않는다(버튼 이벤트의 자연 rerun 1회로 로그인 화면 전환,
+    거기서 delete component가 cookie를 지우고 완료 콜백이 pending을 정리한다)."""
+    st.session_state["authed"] = False
+    st.session_state.pop(_AUTH_COOKIE_PENDING, None)
+    st.session_state.pop(_AUTH_COOKIE_DELETE_DONE, None)   # 새 삭제 사이클 허용
+    st.session_state[_AUTH_LOGGED_OUT] = True
+    st.session_state[_AUTH_COOKIE_DELETE_PENDING] = True
+
+
+def _try_login():
+    """입장 버튼 콜백 — 검증 성공 시 세션 로그인 + 토큰 발급 pending 기록.
+    현재 세션은 session_state로 즉시 사용 가능하며 cookie set을 위한 강제
+    이중 rerun은 없다(다음 자연 rerun에서 set component가 마운트됨)."""
+    pw = st.session_state.get("auth_pw", "")
+    if pw == config.APP_PASSWORD:
+        st.session_state["authed"] = True
+        st.session_state.pop(_AUTH_LOGGED_OUT, None)
+        st.session_state.pop(_AUTH_LOGIN_FAILED, None)
+        st.session_state.pop(_AUTH_COOKIE_DELETE_PENDING, None)
+        st.session_state.pop(_AUTH_COOKIE_DELETE_DONE, None)
+        key = _auth_key()
+        if key:
+            st.session_state[_AUTH_COOKIE_PENDING] = auths.issue_token(key)
+    else:
+        st.session_state[_AUTH_LOGIN_FAILED] = True
+
+
+def _should_clear_login_cookie(raw, delete_pending, logged_out, has_key) -> bool:
+    """로그인 화면에서 cookie 삭제 component를 마운트할지 판정(순수 함수).
+    cookie가 존재하고, 로그아웃 삭제 대기 중이거나 이 세션에서 로그아웃했거나
+    (검증 키가 있는데 인증 화면까지 온) 무효 cookie일 때 True."""
+    return bool(raw) and bool(delete_pending or logged_out or has_key)
+
+
+def _render_logout_button():
+    st.sidebar.button("🔓 로그아웃", key="auth_logout_btn", width="stretch",
+                      on_click=_begin_logout)
+
+
 def gate() -> bool:
     if not config.APP_PASSWORD:
         return True
+    key = _auth_key()
     if st.session_state.get("authed"):
+        tok = st.session_state.get(_AUTH_COOKIE_PENDING)
+        if tok and key:
+            # set 실패(등록 불가·mount 예외)여도 세션 로그인은 유지 — 30일 유지만 미동작
+            auths.render_cookie_set(tok, on_completed=_on_cookie_set_done)
+        _render_logout_button()
         return True
+    # 세션 재생성 시 cookie 복원 — 로그아웃한 세션은 복원하지 않는다
+    raw = _auth_cookie_raw()
+    if (key and raw and not st.session_state.get(_AUTH_LOGGED_OUT)
+            and auths.verify_token(key, raw)):
+        st.session_state["authed"] = True
+        _render_logout_button()
+        return True
+    # 로그인 화면 — 로그아웃 대기·로그아웃 세션·무효(만료·변조) cookie는 삭제 component
+    # 마운트(완료 콜백이 pending 정리 → 이벤트당 자연 rerun 최대 1회, 원본 token 비출력).
+    # 이 세션에서 삭제가 이미 완료됐으면(done 마커) 재마운트하지 않는다(루프 차단).
+    if (not st.session_state.get(_AUTH_COOKIE_DELETE_DONE)
+            and _should_clear_login_cookie(
+                raw, st.session_state.get(_AUTH_COOKIE_DELETE_PENDING),
+                st.session_state.get(_AUTH_LOGGED_OUT), key)):
+        st.session_state[_AUTH_COOKIE_DELETE_PENDING] = True
+        auths.render_cookie_delete(on_completed=_on_cookie_delete_done)
     st.title("🔒 Z PICK")
-    pw = st.text_input("접속 비밀번호", type="password")
-    if st.button("입장"):
-        if pw == config.APP_PASSWORD:
-            st.session_state["authed"] = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 올바르지 않습니다.")
+    st.text_input("접속 비밀번호", type="password", key="auth_pw")
+    st.button("입장", key="auth_login_btn", on_click=_try_login)
+    if st.session_state.pop(_AUTH_LOGIN_FAILED, False):
+        st.error("비밀번호가 올바르지 않습니다.")
+    if key:
+        st.caption("로그인하면 이 기기에서 30일 동안 유지됩니다.")
     return False
 
 
@@ -1359,57 +1483,109 @@ def _badge(text, bg, fg):
             f"font-size:12px;margin-right:6px;white-space:nowrap;'>{html.escape(str(text))}</span>")
 
 
+# ── 매매 카드 접힘 상태 (record id 기반, 동시 다중 펼침) ─────────────────
+# session_state 전용 namespace. 가격(_toss_overlay/_extq_)·인증(authed/_auth_*)·
+# 위젯 key(tr_*)와 충돌하지 않는다. ticker·순번이 아닌 record id(str)만 담는다.
+_TRADE_EXPANDED_KEY = "trade_expanded_record_ids"
+
+# 상태코드 → st.button 라벨용 markdown 색 이름(뱃지 팔레트와 동일 계열:
+# 대기 gray / 진입 blue / TP IN orange / 완료 green, ETF violet).
+_ST_MD_COLOR = {"waiting": "gray", "entered": "blue", "tp_in": "orange", "completed": "green"}
+
+_MD_ESCAPE_RE = None
+
+
+def _md_escape(text) -> str:
+    """버튼 라벨(markdown)에 넣을 값 escape — 서식 문자·$(KaTeX)·:(색 지시자) 무력화."""
+    import re as _re
+    global _MD_ESCAPE_RE
+    if _MD_ESCAPE_RE is None:
+        _MD_ESCAPE_RE = _re.compile(r"([\\`*_{}\[\]()$:~])")
+    return _MD_ESCAPE_RE.sub(r"\\\1", str(text))
+
+
+def _expanded_ids() -> set:
+    v = st.session_state.get(_TRADE_EXPANDED_KEY)
+    if not isinstance(v, set):
+        v = set()
+        st.session_state[_TRADE_EXPANDED_KEY] = v
+    return v
+
+
+def _toggle_trade_card(rid: str):
+    """요약행 클릭 콜백 — 해당 카드만 토글(다른 열린 카드는 건드리지 않음).
+    콜백은 rerun 전에 실행되므로 같은 run의 라벨·본문이 새 상태로 그려진다."""
+    s = _expanded_ids()
+    if rid in s:
+        s.discard(rid)
+    else:
+        s.add(rid)
+
+
+def trade_summary_label(r: dict, expanded: bool = False) -> str:
+    """접힘 카드 한 줄 요약(markdown): **ticker** · 날짜 · 상태 · 시장 · ETF · chevron.
+    화면 폭이 좁으면 줄바꿈될 수 있으나 정보는 누락하지 않는다."""
+    status = r.get("status")
+    st_txt = _ST_LABEL.get(status, str(status or "—"))
+    st_color = _ST_MD_COLOR.get(status, "gray")
+    mkt = "국장" if r.get("market_group") == "KR" else "미장"
+    lev = str(r.get("leverage_symbol") or "").strip()
+    etf_txt = f":violet[2× {_md_escape(lev)}]" if lev else ":gray[본주]"
+    sym = _md_escape(r.get("symbol") or "—")
+    date = _md_escape(r.get("record_date") or "")
+    chevron = "▴" if expanded else "▾"
+    return (f"**{sym}**  ·  {date}  ·  :{st_color}[{st_txt}]  ·  "
+            f":gray[{mkt}]  ·  {etf_txt}  {chevron}")
+
+
 def _render_trade_card(r: dict, currency: str):
-    """기록 1건을 카드형으로: 배지(상태/시장/본주·레버리지) + 핵심 수치 + 상세 expander.
-    모바일 가로 스크롤 최소화 목적(표 대신 카드)."""
+    """기록 1건: 기본 접힘 — 요약행(전체 폭 버튼) + 펼침 시 기존 상세 본문.
+    펼침 상태는 record id 기준 set으로 관리(순서 변경·rerun에도 같은 카드 유지)."""
+    rid = str(r.get("id"))
+    is_open = rid in _expanded_ids()
+    # key → 'st-key-trade_card_*' CSS 클래스 — 모바일 카드 밀도 CSS의 적용 범위 한정용
+    with st.container(border=True, key=f"trade_card_{rid}"):
+        st.button(trade_summary_label(r, is_open), key=f"tr_sum_{rid}",
+                  type="tertiary", width="stretch",
+                  on_click=_toggle_trade_card, args=(rid,))
+        if is_open:
+            _render_trade_card_body(r, currency)
+
+
+def _render_trade_card_body(r: dict, currency: str):
+    """펼친 카드 본문 — 기존 카드 수치·경고·가격조회·상세 expander 그대로."""
     c = _trade_calc(r)
     status = r.get("status")
-    bg, fg = _BADGE_STYLES.get(status, _BADGE_NEUTRAL)
-    lev_sym = str(r.get("leverage_symbol") or "").strip()
-    badges = (
-        _badge(_ST_LABEL.get(status, status), bg, fg)
-        + _badge("국장" if r.get("market_group") == "KR" else "미장", *_BADGE_NEUTRAL)
-        + (_badge(f"2× {lev_sym}", *_BADGE_VIOLET) if lev_sym
-           else _badge("본주", *_BADGE_NEUTRAL))
-    )
-    # key → 'st-key-trade_card_*' CSS 클래스 — 모바일 카드 밀도 CSS의 적용 범위 한정용
-    with st.container(border=True, key=f"trade_card_{r.get('id')}"):
-        st.markdown(
-            f"<div style='display:flex;align-items:center;gap:8px;flex-wrap:wrap;'>"
-            f"<span style='font-size:17px;font-weight:600;'>{html.escape(str(r.get('symbol') or ''))}</span>"
-            f"<span style='color:{_C_TEXT_FAINT};font-size:12px;'>{html.escape(str(r.get('record_date') or ''))}</span>"
-            f"<span>{badges}</span></div>",
-            unsafe_allow_html=True)
-        m1, m2, m3 = st.columns(3)
-        m1.metric("본주 현재가", _fmtp(c["base_now"], currency))
-        m2.metric("거래 현재가" + (" · ETF" if c["is_lev"] else " · 본주"),
-                  _fmtp(c["trade_now"], currency))
-        m3.metric("1차 진입", _fmtp(r.get("entry1"), currency))
-        n1, n2, n3 = st.columns(3)
-        n1.metric("1차 수량", c["qty1"] if c["qty1"] is not None else "—")
-        n2.metric("손절", _fmtp(r.get("stop"), currency))
-        n2.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
-        if status == "completed":
-            _pnl_metric(n3, "총 손익", r.get("realized_total_pnl"), r.get("id"), slot="card")
-        else:
-            n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
-        basis = _basis_caption(c, currency)
-        if basis:
-            st.caption(f"📊 {basis}")
-        _toss_skew_caption(c)         # Toss 쌍이면 본주·ETF 각 기준시각 표시
-        if c["is_lev"] and not c["consistent"]:
-            st.markdown(_warn_box("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
-                                  + (f" ({c['reason']})" if c.get("reason") else "")),
-                        unsafe_allow_html=True)
-        if c["trade_now"] is None:
-            st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 최신 가격 조회를 눌러보세요.")
-        fcol, _sp = st.columns([1, 2.2])
-        if fcol.button("🔍 최신 가격 조회", key=f"tr_fetch_{r.get('id')}",
-                       use_container_width=True):
-            _fetch_external_quote(r)   # 이 기록의 본주·ETF 한 쌍만 외부 조회
-        if r.get("memo"):
-            st.caption(f"📝 {r['memo']}")
-        _render_trade_detail(r, currency)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("본주 현재가", _fmtp(c["base_now"], currency))
+    m2.metric("거래 현재가" + (" · ETF" if c["is_lev"] else " · 본주"),
+              _fmtp(c["trade_now"], currency))
+    m3.metric("1차 진입", _fmtp(r.get("entry1"), currency))
+    n1, n2, n3 = st.columns(3)
+    n1.metric("1차 수량", c["qty1"] if c["qty1"] is not None else "—")
+    n2.metric("손절", _fmtp(r.get("stop"), currency))
+    n2.caption(f"환산 {_fmtp(c['stop_lev'], currency)}")
+    if status == "completed":
+        _pnl_metric(n3, "총 손익", r.get("realized_total_pnl"), r.get("id"), slot="card")
+    else:
+        n3.metric("총 계획 리스크", c["total_risk"] if c["total_risk"] else "—")
+    basis = _basis_caption(c, currency)
+    if basis:
+        st.caption(f"📊 {basis}")
+    _toss_skew_caption(c)         # Toss 쌍이면 본주·ETF 각 기준시각 표시
+    if c["is_lev"] and not c["consistent"]:
+        st.markdown(_warn_box("⚠️ 본주와 ETF의 가격 기준이 달라 환산가 계산을 보류합니다."
+                              + (f" ({c['reason']})" if c.get("reason") else "")),
+                    unsafe_allow_html=True)
+    if c["trade_now"] is None:
+        st.caption("💡 거래 가격 미조회 — 티커 확인(한국은 6자리 코드 권장) 또는 최신 가격 조회를 눌러보세요.")
+    fcol, _sp = st.columns([1, 2.2])
+    if fcol.button("🔍 최신 가격 조회", key=f"tr_fetch_{r.get('id')}",
+                   use_container_width=True):
+        _fetch_external_quote(r)   # 이 기록의 본주·ETF 한 쌍만 외부 조회
+    if r.get("memo"):
+        st.caption(f"📝 {r['memo']}")
+    _render_trade_detail(r, currency)
 
 
 def _render_trade_detail(r: dict, currency: str):
@@ -1473,18 +1649,24 @@ def _render_trade_detail(r: dict, currency: str):
             _pnl_metric(p5, "총 손익", r.get("realized_total_pnl"), r.get("id"), slot="detail")
 
 
+def _refresh_prices():
+    """가격 새로고침 콜백 — rerun 전에 실행되어 같은 run에 새 가격이 반영된다.
+    (기존 인라인 st.rerun() 방식은 화면 상단에서 run을 중단시켜 아래쪽 시장/상태
+    라디오·카드가 그 run에 렌더되지 않아 위젯 상태가 초기화되던 것을 콜백으로 교체.)"""
+    clear_price_caches()              # 가격 쌍·외부 조회 포함 계산용 캐시 초기화
+    _clear_ext_quotes()               # 레코드별 외부 조회 결과도 DB 기준으로 복귀
+    st.session_state["price_asof"] = kst_now_str()
+    st.toast("가격 기준을 새로고침했습니다 — 환산가/수량을 다시 계산합니다")
+
+
 def render_trade_tab():
     # 가격 기준시각 + 새로고침 (latest_price 캐시만 표적 초기화 — 다른 탭 캐시 무영향)
     if "price_asof" not in st.session_state:
         st.session_state["price_asof"] = kst_now_str()
     h1, h2 = st.columns([2.2, 1])
     h1.markdown(f"**가격 기준:** {st.session_state['price_asof']}")
-    if h2.button("🔄 가격 새로고침", key="tr_price_refresh", use_container_width=True):
-        clear_price_caches()          # 가격 쌍·외부 조회 포함 계산용 캐시 초기화
-        _clear_ext_quotes()           # 레코드별 외부 조회 결과도 DB 기준으로 복귀
-        st.session_state["price_asof"] = kst_now_str()
-        st.toast("가격 기준을 새로고침했습니다 — 환산가/수량을 다시 계산합니다")
-        st.rerun()
+    h2.button("🔄 가격 새로고침", key="tr_price_refresh", use_container_width=True,
+              on_click=_refresh_prices)
     st.caption("기본 가격은 Supabase DB의 본주·ETF 최신 공통 거래일 종가 쌍(동일 출처·동일 기준일)입니다. "
                "최신 시세가 필요하면 각 기록의 '최신 가격 조회' 버튼으로 그 기록의 본주·ETF 한 쌍만 외부(FDR) 조회하며, "
                "결과는 화면 표시용으로만 쓰고 DB에는 저장하지 않습니다(수집은 일일 파이프라인 담당).")
@@ -1612,6 +1794,7 @@ def render_trade_tab():
         if m3.button("🗑 삭제", key=f"tr_del_{market_group}_{status}"):
             try:
                 db.delete_trade_record(r["id"])
+                _expanded_ids().discard(str(r["id"]))   # 삭제된 record의 펼침 상태 정리
                 st.toast(f"{r['symbol']} 기록 삭제됨")
                 st.rerun()
             except Exception as e:
@@ -1737,6 +1920,8 @@ def main():
     st.markdown(_HEADER_NAV_CSS, unsafe_allow_html=True)
     # 카드 표면·손익색 CSS 1회 주입 (범위: stock_card_*/trade_card_*/tr_pnl*_ key만)
     st.markdown(_CARD_V3D_CSS, unsafe_allow_html=True)
+    # 매매 카드 요약행 CSS 1회 주입 (범위: tr_sum_* 버튼만)
+    st.markdown(_TRADE_SUMMARY_CSS, unsafe_allow_html=True)
 
     # 앱 헤더 (UI/UX 3C) — 본문 최상단, 세로 여백 최소화(이모지·그라데이션 없음)
     with st.container(key="app_header"):
