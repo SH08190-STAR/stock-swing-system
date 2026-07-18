@@ -36,7 +36,6 @@ from app import database as db
 from app import quotes as qt
 from app import watchlist as wl
 from app import toss_overlay as tov   # 순수 모듈(quotes만 의존) — relay client는 lazy import
-from app import auth_session as auths  # 순수 모듈(stdlib만) — 30일 로그인 토큰
 
 st.set_page_config(page_title="Z PICK 워치리스트", page_icon="📊", layout="wide")
 
@@ -177,124 +176,25 @@ _TRADE_SUMMARY_CSS = """<style>
 </style>"""
 
 
-# ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) + 30일 로그인 유지 ─────────
-# 구조: session_state["authed"]가 1차. Streamlit 세션이 재생성되면(새로고침·모바일
-# Safari 탭 복귀) st.context.cookies의 서명 토큰(auth_session)으로 복원한다.
-# cookie 쓰기/삭제는 auth_session의 st.components.v2 component가 수행하고
-# (동적 값은 data로만 전달, JS가 재검증), 완료는 setTriggerValue("completed")
-# 콜백으로 수신한다. 비밀번호·secret은 브라우저에 저장하지 않는다.
-# 모든 버튼·완료 콜백은 st.rerun()을 직접 부르지 않는다(위젯 이벤트의 자연
-# rerun만 사용 — 완료 이벤트당 최대 1회, 무한 rerun 없음).
-_AUTH_COOKIE_PENDING = "_auth_cookie_pending"           # 발급 대기 토큰(set 완료 시 정리)
-_AUTH_COOKIE_DELETE_PENDING = "_auth_cookie_delete_pending"  # 삭제 대기(완료 시 정리)
-_AUTH_COOKIE_DELETE_DONE = "_auth_cookie_delete_done"   # 이 세션에서 삭제 완료 — 재마운트 차단
-_AUTH_LOGGED_OUT = "_auth_logged_out"                   # 로그아웃한 세션 — cookie 복원 차단
-_AUTH_LOGIN_FAILED = "_auth_login_failed"
-
-
-def _auth_key():
-    """토큰 서명키. secret 미설정·32바이트 미만이면 None → 30일 유지만 비활성."""
-    try:
-        return auths.derive_key(config.APP_SESSION_SECRET, config.APP_PASSWORD)
-    except Exception:
-        return None
-
-
-def _auth_cookie_raw():
-    """현재 요청의 세션 cookie 값(없으면 None). bare mode 등 context 부재 시 안전."""
-    try:
-        return (st.context.cookies or {}).get(auths.COOKIE_NAME)
-    except Exception:
-        return None
-
-
-def _on_cookie_set_done():
-    """set 완료 신호 — pending 토큰 정리(중복 수신에도 idempotent). rerun 호출 없음."""
-    st.session_state.pop(_AUTH_COOKIE_PENDING, None)
-
-
-def _on_cookie_delete_done():
-    """delete 완료 신호 — pending 정리 + done 마커(중복 수신에도 idempotent).
-    done 마커는 완료 후 재마운트→재신호 루프를 구조적으로 차단한다. rerun 호출 없음."""
-    st.session_state.pop(_AUTH_COOKIE_DELETE_PENDING, None)
-    st.session_state[_AUTH_COOKIE_DELETE_DONE] = True
-
-
-def _begin_logout():
-    """로그아웃 버튼 콜백(2단계 로그아웃의 1단계) — 인증 해제 + 삭제 pending 기록만.
-    st.rerun()을 직접 부르지 않는다(버튼 이벤트의 자연 rerun 1회로 로그인 화면 전환,
-    거기서 delete component가 cookie를 지우고 완료 콜백이 pending을 정리한다)."""
-    st.session_state["authed"] = False
-    st.session_state.pop(_AUTH_COOKIE_PENDING, None)
-    st.session_state.pop(_AUTH_COOKIE_DELETE_DONE, None)   # 새 삭제 사이클 허용
-    st.session_state[_AUTH_LOGGED_OUT] = True
-    st.session_state[_AUTH_COOKIE_DELETE_PENDING] = True
-
-
-def _try_login():
-    """입장 버튼 콜백 — 검증 성공 시 세션 로그인 + 토큰 발급 pending 기록.
-    현재 세션은 session_state로 즉시 사용 가능하며 cookie set을 위한 강제
-    이중 rerun은 없다(다음 자연 rerun에서 set component가 마운트됨)."""
-    pw = st.session_state.get("auth_pw", "")
-    if pw == config.APP_PASSWORD:
-        st.session_state["authed"] = True
-        st.session_state.pop(_AUTH_LOGGED_OUT, None)
-        st.session_state.pop(_AUTH_LOGIN_FAILED, None)
-        st.session_state.pop(_AUTH_COOKIE_DELETE_PENDING, None)
-        st.session_state.pop(_AUTH_COOKIE_DELETE_DONE, None)
-        key = _auth_key()
-        if key:
-            st.session_state[_AUTH_COOKIE_PENDING] = auths.issue_token(key)
-    else:
-        st.session_state[_AUTH_LOGIN_FAILED] = True
-
-
-def _should_clear_login_cookie(raw, delete_pending, logged_out, has_key) -> bool:
-    """로그인 화면에서 cookie 삭제 component를 마운트할지 판정(순수 함수).
-    cookie가 존재하고, 로그아웃 삭제 대기 중이거나 이 세션에서 로그아웃했거나
-    (검증 키가 있는데 인증 화면까지 온) 무효 cookie일 때 True."""
-    return bool(raw) and bool(delete_pending or logged_out or has_key)
-
-
-def _render_logout_button():
-    st.sidebar.button("🔓 로그아웃", key="auth_logout_btn", width="stretch",
-                      on_click=_begin_logout)
-
-
+# ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
+# session_state["authed"] 기반 검증된 단순 구조(운영 검증 완료 형태로 복원).
+# 같은 Streamlit 세션 내 rerun(저장·가격 조회·탭 이동)에서는 session_state가
+# 유지되어 로그인이 풀리지 않고, 새 브라우저 세션에서는 다시 로그인한다.
+# 30일 cookie 로그인은 Community Cloud가 custom cookie를 앱에 전달하지 않아
+# 보류(후속 과제: Streamlit native OIDC 또는 자체 호스팅) — 관련 코드 전부 제거.
 def gate() -> bool:
     if not config.APP_PASSWORD:
         return True
-    key = _auth_key()
     if st.session_state.get("authed"):
-        tok = st.session_state.get(_AUTH_COOKIE_PENDING)
-        if tok and key:
-            # set 실패(등록 불가·mount 예외)여도 세션 로그인은 유지 — 30일 유지만 미동작
-            auths.render_cookie_set(tok, on_completed=_on_cookie_set_done)
-        _render_logout_button()
         return True
-    # 세션 재생성 시 cookie 복원 — 로그아웃한 세션은 복원하지 않는다
-    raw = _auth_cookie_raw()
-    if (key and raw and not st.session_state.get(_AUTH_LOGGED_OUT)
-            and auths.verify_token(key, raw)):
-        st.session_state["authed"] = True
-        _render_logout_button()
-        return True
-    # 로그인 화면 — 로그아웃 대기·로그아웃 세션·무효(만료·변조) cookie는 삭제 component
-    # 마운트(완료 콜백이 pending 정리 → 이벤트당 자연 rerun 최대 1회, 원본 token 비출력).
-    # 이 세션에서 삭제가 이미 완료됐으면(done 마커) 재마운트하지 않는다(루프 차단).
-    if (not st.session_state.get(_AUTH_COOKIE_DELETE_DONE)
-            and _should_clear_login_cookie(
-                raw, st.session_state.get(_AUTH_COOKIE_DELETE_PENDING),
-                st.session_state.get(_AUTH_LOGGED_OUT), key)):
-        st.session_state[_AUTH_COOKIE_DELETE_PENDING] = True
-        auths.render_cookie_delete(on_completed=_on_cookie_delete_done)
     st.title("🔒 Z PICK")
-    st.text_input("접속 비밀번호", type="password", key="auth_pw")
-    st.button("입장", key="auth_login_btn", on_click=_try_login)
-    if st.session_state.pop(_AUTH_LOGIN_FAILED, False):
-        st.error("비밀번호가 올바르지 않습니다.")
-    if key:
-        st.caption("로그인하면 이 기기에서 30일 동안 유지됩니다.")
+    pw = st.text_input("접속 비밀번호", type="password")
+    if st.button("입장"):
+        if pw == config.APP_PASSWORD:
+            st.session_state["authed"] = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 올바르지 않습니다.")
     return False
 
 

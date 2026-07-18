@@ -54,11 +54,6 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "(배포 후 입력)")
 # Streamlit 앱 내 간이 비밀번호(2차 보호). 비우면 비밀번호 화면 생략.
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
-# 30일 로그인 유지 토큰 서명 전용 secret(선택, 최소 32자 무작위 문자열).
-# 미설정·32자 미만이면 30일 유지만 비활성 — 기존 세션 로그인은 그대로 동작(crash 없음).
-# APP_PASSWORD를 서명키로 직접 쓰지 않는다. 값은 출력·repr·로그하지 않는다.
-# validate_for_collector 필수 목록에 넣지 않는다(수집과 무관).
-APP_SESSION_SECRET = os.getenv("APP_SESSION_SECRET", "")
 
 
 # ── 토스 시세 Relay (선택) ───────────────────────────────────
