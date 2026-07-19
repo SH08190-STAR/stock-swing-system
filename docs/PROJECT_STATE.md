@@ -1,33 +1,67 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-17, main=4787186. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-19, main=25fab53. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `4787186` fix: restrict Toss relay overlay to US trades (2026-07-17 운영 배포)
-- main = staging/ui-v3 = `4787186` (fast-forward, merge commit 없음).
-- 토스 시세 Relay 연동 전체가 운영 반영된 상태 — 아래 "토스 Relay 운영" 참조.
+- `25fab53` feat: collapse trade record cards (2026-07-19 운영 배포)
+- main = staging/ui-v3 = `25fab53` (fast-forward, merge commit 없음).
+- 매매기록 카드 접힘형 UX가 운영 반영된 상태 — 아래 "매매 카드 접힘 UX 운영" 참조.
+- 직전 운영 릴리스는 `4787186`(Toss Relay live) — Relay 운영 상태 그대로 유지.
 
 ## LAST_KNOWN_GOOD_COMMIT
-- `4787186` fix: restrict Toss relay overlay to US trades (**2026-07-17 갱신**)
+- `25fab53` feat: collapse trade record cards (**2026-07-19 갱신**)
 - 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
-- 근거: main FF 후 GitHub checks 6건 전부 success(pytest·relay-tests·
-  docker-build-health·smoke), Production 4분 smoke PASS(검사 16회·실패 0·303→200),
-  **운영 실화면 사용자 확인(2026-07-17)** — 국장 우회 정상, 미장 TP IN·진입 provider
-  Toss, 상태 탭 왕복·최신 가격 조회 정상, Relay POST 4건 전부 200, 오류 status 0,
-  AttributeError·traceback·segfault 0. 전체 pytest 363 passed.
-- 이전 LKG `39b8c95`(UI/UX 3D)에서 갱신: 갱신 조건(배포 + smoke 통과 +
-  운영 실화면 확인) 충족. `39b8c95`는 **historical rollback reference로 유지**.
+- 근거: main FF 후 GitHub checks success(pytest·deploy-smoke), Production 4분 smoke
+  PASS(검사 17회·실패 0·bootstrap 303→final 200), **운영 실화면 사용자 확인
+  (2026-07-19)** — 카드 최초 접힘·다중 펼침·개별 닫기·가격 조회 후 펼침/시장/상태
+  유지·수정 저장 후 로그인/펼침 유지, 미장 Toss 정상, 국장 Relay 경고 없음,
+  crash·traceback·segfault 0. 전체 pytest 385 passed.
+- 이전 LKG `4787186`(Toss Relay live)에서 갱신: 갱신 조건(배포 + smoke 통과 +
+  운영 실화면 확인) 충족. `4787186`은 **historical rollback reference로 유지**.
 - 참고: `a2e9a0e`는 "상태 스냅샷 작성 기준 커밋"으로 LKG와 별개다.
 - 갱신 규칙: 배포 후 smoke check + 안정 확인 + 운영 실화면 확인 시에만 갱신
 
 ## 릴리스 tag (rollback 기준)
-- `prod-toss-relay-live-20260717` → **`4787186`** — 현재 운영 릴리스(Toss Relay live).
-- `prod-pre-toss-relay-20260716` → **`3997bb6`** — Toss Relay 도입 직전 main(rollback 기준).
+- `prod-pre-trade-card-collapse-20260719` → **`46f4d41`** — 카드 접힘 릴리스 직전
+  main(현재 롤백 기준). DB·Fly Relay 롤백 불필요(둘 다 무변경).
+- `prod-toss-relay-live-20260717` → **`4787186`** — 직전 운영 릴리스(Toss Relay live).
+- `prod-pre-toss-relay-20260716` → **`3997bb6`** — Toss Relay 도입 직전 main.
 - `39b8c95` — historical operational LKG(UI/UX 3D 시점).
 - tag는 수정·삭제하지 않는다. rollback 시 위 tag를 기준으로 판단한다.
+
+## 매매 카드 접힘 UX 운영 — **완료 (2026-07-19 운영 배포·검증 완료)**
+- `25fab53` 배포: 매매기록 카드를 **기본 접힘형 목록**으로 변경.
+  - 최초 모든 카드 접힘, 요약행(`ticker · 날짜 · 상태 · 시장 · 2× ETF/본주 · chevron`)
+    전체가 터치 영역(tertiary 버튼, width="stretch").
+  - 펼침 상태는 `st.session_state["trade_expanded_record_ids"]`(record UUID str의 set)
+    — 여러 카드 동시 펼침, 데이터 순서 변경 안전, 개별 카드 닫기, 삭제 record 정리,
+    새 record 기본 접힘, 가격 갱신·수정 저장 rerun 후 열린 카드 유지.
+  - 펼친 본문은 기존 상세·수정·삭제·최신 가격 조회·환산 계산 전부 유지(무변경).
+  - 부수 수정: `가격 새로고침` 버튼을 인라인 st.rerun() → on_click 콜백으로 교체
+    (기존 상단 rerun이 시장/상태 라디오를 초기화하던 문제 해결 — 필터·펼침 유지).
+- 운영 검증(2026-07-19, 사용자 실화면): 카드 접힘/다중 펼침/개별 닫기·가격 조회 후
+  펼침·시장·상태 유지·수정 저장 후 로그인/펼침 유지·모바일 화면 정상, 미장 Toss
+  정상, 국장 Relay 경고 없음, crash·traceback·segfault 없음.
+- 무변경: app/toss.py·toss_relay_client·toss_overlay·services/toss_relay·
+  database.py·계산식·가격 우선순위·requirements·Dockerfile·workflows·schema/CSV·Fly.
+  DB schema/write 변경 없음, Fly Relay version 4 유지, Toss Relay 운영 상태 유지.
+
+## 인증 정책 — 30일 로그인 제거, APP_PASSWORD + session_state (2026-07-19)
+- **결정: 30일 자동 로그인 유지 기능 제거.** 동작하지 않는 인증 코드를 운영에 남기지 않음.
+- 원인(staging 실측 확정): **Streamlit Community Cloud edge proxy가 custom cookie를
+  앱 컨테이너의 WebSocket handshake로 전달하지 않아** `st.context.cookies`에 이름 자체가
+  도달하지 않음(서버 복원 불가). 브라우저 cookie 생성·보존은 정상 — Cloud 프록시 경계
+  문제이며 브라우저(Safari) 문제 아님. 로컬 직접 서빙에서는 동일 코드가 완전 동작.
+- 현재 정책: `APP_PASSWORD` + `st.session_state["authed"]` 단순 gate(검증된 원형).
+  같은 Streamlit 세션 내 rerun(저장·가격 조회·탭 이동)에서는 로그인 유지, 새 브라우저
+  세션에서는 재로그인. cookie 미발급.
+- **APP_SESSION_SECRET 사용하지 않음** — 코드에서 읽지 않음(잔재 0건, app/auth_session.py
+  삭제). staging Secrets의 값은 삭제 완료, Production엔 애초에 미입력.
+- 후속 후보(별도 과제): ① Streamlit native OIDC(st.login) ② 자체 호스팅(프록시 없는
+  직접 서빙이면 cookie 방식 재사용 가능 — 구현은 git 이력 d7540f3에 보존).
 
 ## UI/UX 진행 상태
 - 3A(전역 config.toml 라이트 테마): **폐기** — 스테이징 Segmentation fault 재현.
