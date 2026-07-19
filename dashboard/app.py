@@ -31,6 +31,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
+from app import auth
 from app import config
 from app import database as db
 from app import quotes as qt
@@ -176,26 +177,107 @@ _TRADE_SUMMARY_CSS = """<style>
 </style>"""
 
 
-# ── 간이 비밀번호 보호 (APP_PASSWORD 설정 시) ───────────────
-# session_state["authed"] 기반 검증된 단순 구조(운영 검증 완료 형태로 복원).
+# ── 인증 gate (AUTH_MODE: password | oidc) ──────────────────
+# gate()는 main() 최상단에서 실행되어 DB·Relay·가격 조회·본문 렌더보다 항상
+# 먼저 통과 여부를 결정한다. 설정 우선순위: st.secrets(root) > 환경변수 > 기본값.
+# 모드는 Secrets(AUTH_MODE)로만 전환:
+#  - 미설정/""      → 기존 password 모드 (코드 선배포 시 운영 동작 불변)
+#  - "password"    → APP_PASSWORD gate. 단, APP_PASSWORD 미설정·공백이면 fail closed
+#                    (자동 통과 없음 — 비밀번호 입력창도 열지 않음).
+#  - "oidc"        → Streamlit 공식 st.login/st.user 기반 Google OIDC.
+#                    password fallback 없음 — OIDC 오류로 비밀번호 화면을 열지 않음.
+#  - 그 외 값      → fail closed (보호 화면 없이 관리자 설정 오류만 표시)
+# fail closed 시 설정 키 이름·값·길이는 화면·로그에 출력하지 않는다.
+def _secrets_or_none():
+    """st.secrets 안전 접근 — secrets 미구성·로드 실패 시 None(오류 비노출)."""
+    try:
+        sec = st.secrets
+        "AUTH_MODE" in sec          # secrets 파일 없으면 여기서 예외 → None
+        return sec
+    except Exception:
+        return None
+
+
+def _auth_fail_closed(msg: str) -> bool:
+    """보호 화면 없이 관리자용 오류만 표시하고 스크립트를 중단한다."""
+    st.title("🔒 Z PICK")
+    st.error(msg)
+    st.stop()
+    return False
+
+
+def gate() -> bool:
+    sec = _secrets_or_none()
+    mode = auth.resolve_auth_mode(auth.read_setting(
+        "AUTH_MODE", secrets=sec, default=getattr(config, "AUTH_MODE", "")))
+    if mode == auth.MODE_PASSWORD:
+        return _password_gate(sec)
+    if mode == auth.MODE_OIDC:
+        return _oidc_gate(sec)
+    return _auth_fail_closed("관리자 설정 오류입니다. AUTH_MODE 설정을 확인하세요.")
+
+
+# ── 간이 비밀번호 보호 (APP_PASSWORD) ───────────────────────
+# session_state["authed"] 기반 검증된 단순 구조(운영 검증 완료 형태 유지).
 # 같은 Streamlit 세션 내 rerun(저장·가격 조회·탭 이동)에서는 session_state가
 # 유지되어 로그인이 풀리지 않고, 새 브라우저 세션에서는 다시 로그인한다.
-# 30일 cookie 로그인은 Community Cloud가 custom cookie를 앱에 전달하지 않아
-# 보류(후속 과제: Streamlit native OIDC 또는 자체 호스팅) — 관련 코드 전부 제거.
-def gate() -> bool:
-    if not config.APP_PASSWORD:
-        return True
+# APP_PASSWORD 미설정·빈값·공백 → fail closed (기존의 자동 통과 제거).
+def _password_gate(sec=None) -> bool:
+    pw_conf = auth.read_setting("APP_PASSWORD", secrets=sec,
+                                default=getattr(config, "APP_PASSWORD", ""))
+    if not isinstance(pw_conf, str) or not pw_conf.strip():
+        return _auth_fail_closed("관리자 인증 설정 오류입니다.")
     if st.session_state.get("authed"):
         return True
     st.title("🔒 Z PICK")
     pw = st.text_input("접속 비밀번호", type="password")
     if st.button("입장"):
-        if pw == config.APP_PASSWORD:
+        if pw == pw_conf:
             st.session_state["authed"] = True
             st.rerun()
         else:
             st.error("비밀번호가 올바르지 않습니다.")
     return False
+
+
+# ── Google OIDC gate (Streamlit 공식 st.login/st.user/st.logout) ─────────
+# 30일 identity cookie는 Community Cloud의 공식 OIDC 세션이 관리한다 —
+# 자체 cookie·component·브라우저 저장소·token 구현 없음. st.login()·st.logout()은
+# 자체적으로 새 세션을 시작하므로 추가 st.rerun을 부르지 않는다.
+# 허용 판정은 app.auth의 순수 함수(정확 일치·fail closed)만 사용하고,
+# 허용 목록·내부 설정은 화면·로그에 출력하지 않는다.
+# preflight: [auth] 필수 설정이 유효하지 않으면 로그인 버튼·st.login을 열지 않고
+# fail closed (누락 키·값은 표시하지 않음).
+def _oidc_gate(sec=None) -> bool:
+    auth_section = None
+    if sec is not None:
+        try:
+            auth_section = sec["auth"] if "auth" in sec else None
+        except Exception:
+            auth_section = None
+    if not auth.oidc_config_ok(auth_section):
+        return _auth_fail_closed("Google 로그인 설정 오류입니다.")
+    user = getattr(st, "user", None)
+    if user is None or not getattr(user, "is_logged_in", False):
+        st.title("🔒 Z PICK")
+        st.caption("허용된 Google 계정으로 로그인하세요")
+        st.button("Google로 로그인", on_click=st.login)
+        return False
+    email = getattr(user, "email", None)
+    allowed = auth.read_setting("ALLOWED_GOOGLE_EMAILS", secrets=sec,
+                                default=getattr(config, "ALLOWED_GOOGLE_EMAILS", ""))
+    if not auth.is_email_allowed(email, allowed):
+        st.title("🔒 Z PICK")
+        st.error("허용되지 않은 Google 계정입니다")
+        st.button("다른 계정으로 로그인", on_click=st.logout)
+        return False
+    # 통과 — 사이드바 상단에 작은 로그아웃만 제공(본문 카드·모바일 레이아웃 무영향).
+    with st.sidebar:
+        name = getattr(user, "name", "") or ""
+        if name:
+            st.caption(str(name))
+        st.button("로그아웃", on_click=st.logout, key="oidc_logout")
+    return True
 
 
 def merge_universe(wl_rows: pd.DataFrame, db_stocks: pd.DataFrame) -> pd.DataFrame:

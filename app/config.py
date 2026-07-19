@@ -55,6 +55,17 @@ DASHBOARD_URL = os.getenv("DASHBOARD_URL", "(배포 후 입력)")
 # Streamlit 앱 내 간이 비밀번호(2차 보호). 비우면 비밀번호 화면 생략.
 APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
+# ── 인증 모드 (Google OIDC 전환용) ──────────────────────────
+# AUTH_MODE: "" 또는 미설정 = 기존 password 모드(운영 기본, 코드 선배포 안전),
+#            "password" = 명시적 password 모드, "oidc" = Streamlit 공식
+#            st.login/st.user 기반 Google OIDC. 그 외 값은 fail closed.
+# ALLOWED_GOOGLE_EMAILS: OIDC 허용 이메일(콤마 구분 문자열). 실제 이메일은
+#            Streamlit Secrets에만 두고 repo에 커밋하지 않는다.
+# OIDC client 값([auth] 섹션의 client_id/client_secret/cookie_secret 등)은
+# Streamlit이 secrets.toml에서 직접 읽으므로 여기서 다루지 않는다.
+AUTH_MODE = os.getenv("AUTH_MODE", "")
+ALLOWED_GOOGLE_EMAILS = os.getenv("ALLOWED_GOOGLE_EMAILS", "")
+
 
 # ── 토스 시세 Relay (선택) ───────────────────────────────────
 # 본주·레버리지 ETF 현재가 live overlay용. Streamlit은 Toss를 직접 호출하지 않고

@@ -28,13 +28,19 @@ class _StubSt:
         self.session_state = {}
         self.errors = []
         self.rerun_calls = 0
+        self.stop_calls = 0
+        self.text_input_calls = 0
         self._pw = pw_input
         self._clicked = button_clicked
 
     def title(self, *a, **k):
         pass
 
+    def stop(self):
+        self.stop_calls += 1
+
     def text_input(self, *a, **k):
+        self.text_input_calls += 1
         return self._pw
 
     def button(self, *a, **k):
@@ -58,9 +64,14 @@ def _stubbed(pw_input="", clicked=False, app_password="pw123"):
 
 
 # ── 로그인 기본 ─────────────────────────────────────────────
-def test_gate_open_when_no_password_configured():
+def test_gate_fail_closed_when_no_password_configured():
+    """APP_PASSWORD 미설정 자동 통과 제거(보안 하드닝) — fail closed.
+    비밀번호 입력창도 열지 않고 관리자 오류만 표시 후 중단한다."""
     m = _stubbed(app_password="")
-    assert m.gate() is True                                 # APP_PASSWORD 미설정 → 통과
+    assert m.gate() is False
+    assert any("관리자 인증 설정 오류" in e for e in m.st.errors)
+    assert m.st.stop_calls == 1
+    assert m.st.text_input_calls == 0                       # 보호 UI 미노출
 
 
 def test_login_with_correct_password():
