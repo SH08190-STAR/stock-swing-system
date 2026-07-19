@@ -192,7 +192,8 @@ def _secrets_or_none():
     """st.secrets 안전 접근 — secrets 미구성·로드 실패 시 None(오류 비노출)."""
     try:
         sec = st.secrets
-        "AUTH_MODE" in sec          # secrets 파일 없으면 여기서 예외 → None
+        # bare expression은 Streamlit magic이 화면에 렌더하므로 할당으로 소비한다.
+        _ = "AUTH_MODE" in sec      # secrets 파일 없으면 여기서 예외 → None
         return sec
     except Exception:
         return None

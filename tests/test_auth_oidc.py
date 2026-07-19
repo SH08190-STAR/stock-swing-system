@@ -494,6 +494,153 @@ def test_oidc_valid_config_shows_login_button():
     assert m.st.login_calls == 1                        # 정상 설정에서만 st.login 가능
 
 
+# ── I. 렌더 회귀 — Streamlit magic bare expression 출력 금지 ─
+# Streamlit magic은 메인 스크립트(함수 본문 포함)의 bare expression을
+# st.write로 렌더한다. 과거 `"AUTH_MODE" in sec` 단독 라인이 화면 좌측 상단에
+# `True`로 노출된 회귀를 막는다: (1) magic을 AST로 에뮬레이트해 실제 렌더
+# 문자열을 수집·검증하고, (2) 소스에 bare expression 자체가 없음을 보장한다.
+class _RenderSt(_OidcStubSt):
+    """모든 렌더 호출(write/text/markdown/title/caption/error)을 문자열로 수집."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.rendered = []
+
+    def write(self, *args, **k):
+        self.rendered.extend(str(a) for a in args)
+
+    def text(self, body, *a, **k):
+        self.rendered.append(str(body))
+
+    def markdown(self, body, *a, **k):
+        self.rendered.append(str(body))
+
+    def title(self, body, *a, **k):
+        self.rendered.append(str(body))
+
+    def caption(self, msg, *a, **k):
+        self.captions.append(str(msg))
+        self.rendered.append(str(msg))
+
+    def error(self, msg):
+        self.errors.append(str(msg))
+        self.rendered.append(str(msg))
+
+
+class _MagicEmulator(ast.NodeTransformer):
+    """Streamlit magic 근사 — bare expression(호출·docstring 제외)을 st.write로
+    감싼다. 실제 magic이 값으로 렌더하는 부류만 재현한다."""
+
+    def generic_visit(self, node):
+        super().generic_visit(node)
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if isinstance(stmts, list):
+                setattr(node, field, self._rewrite(stmts))
+        return node
+
+    @staticmethod
+    def _rewrite(stmts):
+        out = []
+        for i, stmt in enumerate(stmts):
+            if (isinstance(stmt, ast.Expr)
+                    and not isinstance(stmt.value, (ast.Call, ast.Await))
+                    and not (i == 0 and isinstance(stmt.value, ast.Constant)
+                             and isinstance(stmt.value.value, str))):
+                wrapped = ast.Expr(ast.Call(
+                    func=ast.Attribute(value=ast.Name(id="st", ctx=ast.Load()),
+                                       attr="write", ctx=ast.Load()),
+                    args=[stmt.value], keywords=[]))
+                out.append(ast.copy_location(wrapped, stmt))
+            else:
+                out.append(stmt)
+        return out
+
+
+def _dash_magic(user=None, secrets=None, config_extra=None):
+    """dashboard/app.py를 magic 에뮬레이션 AST로 로드 — 렌더 회귀 검증용."""
+    p = os.path.join(ROOT, "dashboard", "app.py")
+    with open(p, encoding="utf-8") as f:
+        tree = _MagicEmulator().visit(ast.parse(f.read()))
+    ast.fix_missing_locations(tree)
+    spec = importlib.util.spec_from_file_location("dash_magic_test", p)
+    m = importlib.util.module_from_spec(spec)
+    exec(compile(tree, p, "exec"), m.__dict__)
+    m.st = _RenderSt(user, secrets=secrets)
+    cfg = {"AUTH_MODE": "oidc", "ALLOWED_GOOGLE_EMAILS": ALLOW}
+    cfg.update(config_extra or {})
+    m.config = SimpleNamespace(**cfg)
+    return m
+
+
+def _assert_no_bool_rendered(m):
+    assert "True" not in m.st.rendered
+    assert "False" not in m.st.rendered
+
+
+def test_oidc_login_screen_renders_no_bool_text():
+    m = _dash_magic(user=None)
+    assert m.gate() is False
+    assert any("허용된 Google 계정" in c for c in m.st.captions)   # 안내 유지
+    assert any("Google" in b[0] for b in m.st.buttons)             # 버튼 유지
+    _assert_no_bool_rendered(m)
+
+
+def test_oidc_other_screens_render_no_bool_text():
+    for user in (_user(), _user(email="other@example.com"),
+                 _user(logged_in=False)):
+        m = _dash_magic(user=user)
+        m.gate()
+        _assert_no_bool_rendered(m)
+
+
+def test_password_screen_renders_no_bool_text():
+    m = _dash_magic(user=None, secrets={},
+                    config_extra={"AUTH_MODE": "password", "APP_PASSWORD": "pw123"})
+    m.st.text_input = lambda *a, **k: ""
+    assert m.gate() is False
+    _assert_no_bool_rendered(m)
+
+
+def test_fail_closed_screen_renders_no_bool_text():
+    m = _dash_magic(user=None, secrets={}, config_extra={"AUTH_MODE": "weird"})
+    assert m.gate() is False
+    assert any("관리자 설정 오류" in e for e in m.st.errors)       # 오류 화면 유지
+    _assert_no_bool_rendered(m)
+
+
+def test_no_bare_expressions_in_dashboard_source():
+    """메인 스크립트의 bare expression은 magic이 그대로 렌더한다 — 0건 유지."""
+    p = os.path.join(ROOT, "dashboard", "app.py")
+    with open(p, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    offenders = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            for i, stmt in enumerate(stmts):
+                if not isinstance(stmt, ast.Expr):
+                    continue
+                if isinstance(stmt.value, (ast.Call, ast.Await)):
+                    continue
+                if (i == 0 and isinstance(stmt.value, ast.Constant)
+                        and isinstance(stmt.value.value, str)):
+                    continue                      # docstring
+                offenders.append(stmt.lineno)
+    assert offenders == [], f"bare expression lines: {offenders}"
+
+
+def test_no_debug_write_or_print_in_auth_flow():
+    m = _dash()
+    for fn in (m.gate, m._oidc_gate, m._password_gate,
+               m._secrets_or_none, m._auth_fail_closed):
+        src = inspect.getsource(fn)
+        assert "st.write" not in src, fn.__name__
+        assert "print(" not in src, fn.__name__
+
+
 # ── E. password 모드 불변 (기존 test_auth_gate.py 보완) ──────
 def test_password_mode_explicit_uses_password_gate():
     m = _dash()
