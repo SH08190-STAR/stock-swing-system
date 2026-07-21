@@ -1,32 +1,35 @@
 # PROJECT_STATE — 저장소 현재 상태 스냅샷
 
-> 기준: 2026-07-19, main=25fab53. 값이 바뀌면 이 스냅샷을 갱신한다.
+> 기준: 2026-07-22, main=44cd398. 값이 바뀌면 이 스냅샷을 갱신한다.
 
 ## 상태 스냅샷 기준 커밋 (최신 애플리케이션 기능 커밋)
 - a2e9a0e `feat: add dashboard search and fix trade labels` (스냅샷 시점 기준)
 
 ## 최신 저장소 커밋 (main HEAD)
-- `25fab53` feat: collapse trade record cards (2026-07-19 운영 배포)
-- main = staging/ui-v3 = `25fab53` (fast-forward, merge commit 없음).
-- 매매기록 카드 접힘형 UX가 운영 반영된 상태 — 아래 "매매 카드 접힘 UX 운영" 참조.
-- 직전 운영 릴리스는 `4787186`(Toss Relay live) — Relay 운영 상태 그대로 유지.
+- `44cd398` fix: remove OIDC debug output (2026-07-21 운영 배포)
+- main = `44cd398`. `91523e0`에서 fast-forward(merge commit 없음).
+- Google OIDC 인증이 운영 반영된 상태 — 아래 "인증 정책 — Google OIDC 운영" 참조.
+- staging/ui-v3 = `f32b86a` — 취소된 로그아웃 핫픽스를 revert한 상태로,
+  **파일 내용(tree)은 `44cd398`과 동일**하다.
+- 직전 운영 릴리스는 `25fab53`(매매 카드 접힘 UX) — 카드 동작 그대로 유지.
 
 ## LAST_KNOWN_GOOD_COMMIT
-- `25fab53` feat: collapse trade record cards (**2026-07-19 갱신**)
+- `44cd398` fix: remove OIDC debug output (**2026-07-22 갱신**)
 - 의미: **운영(Streamlit Cloud)에서 정상 동작이 확인된 커밋.** 현재 main HEAD와 동일.
 - 근거: main FF 후 GitHub checks success(pytest·deploy-smoke), Production 4분 smoke
   PASS(검사 17회·실패 0·bootstrap 303→final 200), **운영 실화면 사용자 확인
-  (2026-07-19)** — 카드 최초 접힘·다중 펼침·개별 닫기·가격 조회 후 펼침/시장/상태
-  유지·수정 저장 후 로그인/펼침 유지, 미장 Toss 정상, 국장 Relay 경고 없음,
-  crash·traceback·segfault 0. 전체 pytest 385 passed.
-- 이전 LKG `4787186`(Toss Relay live)에서 갱신: 갱신 조건(배포 + smoke 통과 +
-  운영 실화면 확인) 충족. `4787186`은 **historical rollback reference로 유지**.
+  (2026-07-22)** — Google 로그인·로그인 지속성·앱 내부 로그아웃·재로그인 정상,
+  기존 KPI·실데이터·국장↔미장 왕복 정상, Toss Relay 경고 없음,
+  crash·traceback·segfault 0. 전체 pytest 445 passed.
+- 이전 LKG `25fab53`(카드 접힘 UX)에서 갱신: 갱신 조건(배포 + smoke 통과 +
+  운영 실화면 확인) 충족. `25fab53`은 **historical rollback reference로 유지**.
 - 참고: `a2e9a0e`는 "상태 스냅샷 작성 기준 커밋"으로 LKG와 별개다.
 - 갱신 규칙: 배포 후 smoke check + 안정 확인 + 운영 실화면 확인 시에만 갱신
 
 ## 릴리스 tag (rollback 기준)
-- `prod-pre-trade-card-collapse-20260719` → **`46f4d41`** — 카드 접힘 릴리스 직전
-  main(현재 롤백 기준). DB·Fly Relay 롤백 불필요(둘 다 무변경).
+- `prod-pre-google-oidc-20260721` → **`91523e0`** — Google OIDC 릴리스 직전
+  main(현재 코드 롤백 기준). DB·Fly Relay 롤백 불필요(둘 다 무변경).
+- `prod-pre-trade-card-collapse-20260719` → **`46f4d41`** — 카드 접힘 릴리스 직전 main.
 - `prod-toss-relay-live-20260717` → **`4787186`** — 직전 운영 릴리스(Toss Relay live).
 - `prod-pre-toss-relay-20260716` → **`3997bb6`** — Toss Relay 도입 직전 main.
 - `39b8c95` — historical operational LKG(UI/UX 3D 시점).
@@ -49,19 +52,70 @@
   database.py·계산식·가격 우선순위·requirements·Dockerfile·workflows·schema/CSV·Fly.
   DB schema/write 변경 없음, Fly Relay version 4 유지, Toss Relay 운영 상태 유지.
 
-## 인증 정책 — 30일 로그인 제거, APP_PASSWORD + session_state (2026-07-19)
-- **결정: 30일 자동 로그인 유지 기능 제거.** 동작하지 않는 인증 코드를 운영에 남기지 않음.
-- 원인(staging 실측 확정): **Streamlit Community Cloud edge proxy가 custom cookie를
-  앱 컨테이너의 WebSocket handshake로 전달하지 않아** `st.context.cookies`에 이름 자체가
-  도달하지 않음(서버 복원 불가). 브라우저 cookie 생성·보존은 정상 — Cloud 프록시 경계
-  문제이며 브라우저(Safari) 문제 아님. 로컬 직접 서빙에서는 동일 코드가 완전 동작.
-- 현재 정책: `APP_PASSWORD` + `st.session_state["authed"]` 단순 gate(검증된 원형).
-  같은 Streamlit 세션 내 rerun(저장·가격 조회·탭 이동)에서는 로그인 유지, 새 브라우저
-  세션에서는 재로그인. cookie 미발급.
-- **APP_SESSION_SECRET 사용하지 않음** — 코드에서 읽지 않음(잔재 0건, app/auth_session.py
-  삭제). staging Secrets의 값은 삭제 완료, Production엔 애초에 미입력.
-- 후속 후보(별도 과제): ① Streamlit native OIDC(st.login) ② 자체 호스팅(프록시 없는
-  직접 서빙이면 cookie 방식 재사용 가능 — 구현은 git 이력 d7540f3에 보존).
+## 인증 정책 — Google OIDC 운영 (**완료, 2026-07-22 운영 배포·검증 완료**)
+- `44cd398` 배포: Streamlit 1.58 공식 `st.login` / `st.user` / `st.logout` 기반
+  Google OIDC gate. 30일 identity cookie는 Community Cloud 공식 OIDC 세션이 담당 —
+  **자체 cookie·component·브라우저 저장소·token 구현 0건**(APP_SESSION_SECRET 미사용).
+- gate는 `main()` 최상단 — 미로그인·미허용 시 DB/Relay/FDR/Toss/본문 진입 0.
+
+### 인증 모드 전환 정책 (Secrets로만 제어)
+- 설정 우선순위: **st.secrets(root) > 환경변수 > 기본값** (`auth.read_setting`)
+- `AUTH_MODE` 미설정/`""` → password 모드 (코드 선배포 시 동작 불변)
+- `AUTH_MODE="password"` → APP_PASSWORD gate. **미설정·빈값·공백이면 fail closed**
+  (자동 통과 없음 — 비밀번호 입력창도 열지 않고 "관리자 인증 설정 오류"만)
+- `AUTH_MODE="oidc"` → Google OIDC gate. **APP_PASSWORD fallback 없음**(오류 시에도 우회 불가).
+  **[auth] preflight**: redirect_uri(절대 http/https + `/oauth2callback` 종료)·
+  cookie_secret(UTF-8 32바이트 이상)·client_id·client_secret·server_metadata_url이
+  전부 유효해야만 로그인 버튼·st.login 노출, 아니면 fail closed
+  ("Google 로그인 설정 오류"만 — 누락 키·값 비노출)
+- 그 외 값 → fail closed ("관리자 설정 오류"만 표시)
+- 허용 이메일: `ALLOWED_GOOGLE_EMAILS`(쉼표 구분 문자열 1개, TOML 리스트도 파싱).
+  strip+casefold 정규화 후 **정확 일치만** — 부분 일치·도메인 와일드카드 금지.
+  미설정·빈 목록·email claim 없음 → 거부. 실제 값은 Secrets에만 두고 repo 커밋 금지.
+
+### 운영 검증 결과 (2026-07-22, 사용자 실화면)
+- Google 로그인 화면 정상, **APP_PASSWORD 화면 미노출**. 허용 계정 로그인 성공.
+- `invalid_client`·`redirect_uri_mismatch`·`access_denied`·무한 redirect **없음**.
+- 기존 앱 본문·기존 Supabase 데이터 정상.
+- 로그인 지속성(Chrome): 같은 탭 새로고침 / 새 탭 / 모든 탭 종료 후 재접속 **모두 유지**.
+- 앱 내부 로그아웃: 즉시 Google 로그인 화면 전환, 보호 본문 미노출, 같은 탭
+  새로고침·새 탭 접속 모두 재로그인 요구, APP_PASSWORD fallback 없음.
+  최종 재로그인 후 운영 상태 복구 완료.
+- 기능 회귀: 기존 KPI·실데이터 정상, 국장↔미장 왕복 정상, Toss Relay 경고 없음,
+  Authlib·관리자 설정 오류·True/False 디버그 출력·traceback·segfault **없음**.
+- 전체 pytest 445 passed. Production 4분 smoke PASS(17회·실패 0·303→200).
+- DB migration·write 0 — user/email 컬럼 추가 없음, 기존 데이터 무변경.
+
+### 롤백 기준
+- **설정 롤백(빠름)**: Production Secrets에서 `AUTH_MODE` 삭제 ·
+  `ALLOWED_GOOGLE_EMAILS` 삭제 · `[auth]` 섹션 전체 삭제 · 기존 `APP_PASSWORD` 유지 →
+  Save 1회 → Production Reboot 1회. 코드 롤백 없이 password 모드로 복귀한다.
+- **코드 롤백**: tag `prod-pre-google-oidc-20260721` → commit `91523e0`.
+
+### 운영 주의
+- client_id/client_secret은 **Staging과 동일 OAuth client**를 사용한다.
+- cookie_secret은 **Production 전용 값** — 변경 시 기존 로그인 쿠키가 전부 무효화된다.
+- Google OAuth 앱은 **Testing 상태 유지**.
+- Production과 Staging의 redirect_uri를 혼동하지 않는다(앱별 절대 URL).
+- **credential 값(client id/secret·cookie secret·실제 허용 이메일)은 문서·repo에
+  절대 기록하지 않는다** — Streamlit Secrets에만 존재.
+
+### 취소된 로그아웃 핫픽스 (기록용)
+- 사용자가 **Chrome/Google 계정 로그아웃**을 Z PICK 앱 내부 로그아웃으로 오해해
+  "로그아웃 무반응"으로 보고됨.
+- 이 오해를 전제로 `ff03e73`(로그아웃을 스크립트 본문 직접 호출로 변경)이
+  생성됐으나 **Production main에는 병합하지 않았다.**
+- 실제 Production 앱 내부 로그아웃은 기존 `44cd398`에서 정상 작동한다.
+- staging은 `f32b86a` revert로 원복 — staging tree는 `44cd398`과 동일.
+  `hotfix/oidc-logout`(ff03e73) 브랜치는 이력 보존용으로 남긴다.
+- 내부 Streamlit 큐 경합 등 원인 가설은 **확정 원인으로 기록하지 않는다.**
+
+### 이전 정책 (이력)
+- 30일 자동 로그인(custom cookie) 방식은 **폐기**(2026-07-19). 원인(staging 실측):
+  Community Cloud edge proxy가 custom cookie를 앱 컨테이너 WebSocket handshake로
+  전달하지 않아 `st.context.cookies`에 도달하지 않음. 구현은 git 이력 d7540f3에 보존.
+- 그 뒤 `APP_PASSWORD` + `st.session_state["authed"]` 단순 gate를 운영했고,
+  현재는 위 OIDC gate가 이를 대체한다(password 모드 코드는 fallback으로 보존).
 
 ## UI/UX 진행 상태
 - 3A(전역 config.toml 라이트 테마): **폐기** — 스테이징 Segmentation fault 재현.
@@ -315,4 +369,8 @@ stocks, prices, history, errors, meta, stock_targets, trade_records
   차단. 현재 정책·검증 결과는 "토스 Relay 운영" 섹션 참조.
 - **KR Toss 지원은 의도적 비활성** — 숫자 코드·한글 종목명 혼재와 Toss의 KR 심볼
   포맷이 미검증. 별도 검증 단계 없이 활성화 금지.
-- 미push 로컬 변경: 없음 (main·staging 모두 `4787186`, 작업 트리 clean).
+- Google OIDC 인증: **운영 배포·검증 완료**(main=LKG=`44cd398`, 2026-07-22).
+  정책·롤백 기준은 "인증 정책 — Google OIDC 운영" 섹션 참조.
+- 취소된 로그아웃 핫픽스 `ff03e73`: main 미병합, staging은 `f32b86a`로 revert 완료.
+  브랜치 `hotfix/oidc-logout`은 이력 보존용으로 유지(병합 금지).
+- 미push 로컬 변경: 없음 (main=`44cd398`, staging=`f32b86a`, 작업 트리 clean).

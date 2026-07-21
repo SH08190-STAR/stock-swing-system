@@ -4,68 +4,60 @@
 > 아래 템플릿 전체를 새로 채운다. 작업이 없으면 상태를 `대기`로 둔다.
 
 ## 상태
-검수  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
+완료  <!-- 대기 / 설계 / 구현 / 검수 / push 대기 / 완료 -->
 
-## 현재 작업 — Google OIDC 인증 전환 1차 (구현·로컬 검증 완료, 2026-07-19)
-- 브랜치: `feature/google-oidc-auth` (base `91523e0`). **commit·push·deploy 미수행.**
-- Streamlit 1.58 공식 `st.login` / `st.user` / `st.logout` 기반 Google OIDC gate 구현.
+## 현재 작업 — Google OIDC 인증 Production 릴리스 (완료, 2026-07-22)
+- main = Production = `44cd398`. 배포 전 main은 `91523e0`, ff-only 병합(merge commit 0개).
+- Streamlit 1.58 공식 `st.login` / `st.user` / `st.logout` 기반 Google OIDC gate 운영 반영.
   30일 identity cookie는 Community Cloud 공식 OIDC 세션이 담당 —
   자체 cookie·component·브라우저 저장소·token 구현 0건.
+- 상세 정책·운영 기준·롤백 절차는 docs/PROJECT_STATE.md
+  "인증 정책 — Google OIDC 운영" 섹션을 정본으로 한다.
 
-### 인증 모드 전환 정책 (Secrets로만 제어)
-- 설정 우선순위: **st.secrets(root) > 환경변수 > 기본값** (`auth.read_setting`)
-- `AUTH_MODE` 미설정/`""` → password 모드 (**코드 선배포 시 Production 동작 불변** —
-  운영은 APP_PASSWORD 설정 상태)
-- `AUTH_MODE="password"` → APP_PASSWORD gate. **APP_PASSWORD 미설정·빈값·공백이면
-  fail closed** (자동 통과 제거 — 비밀번호 입력창도 열지 않고 "관리자 인증 설정 오류"만)
-- `AUTH_MODE="oidc"` → Google OIDC gate. APP_PASSWORD fallback 없음(오류 시에도 우회 불가).
-  **[auth] preflight**: redirect_uri(절대 http/https + `/oauth2callback` 종료)·
-  cookie_secret(UTF-8 32바이트 이상)·client_id·client_secret·server_metadata_url이
-  전부 유효해야만 로그인 버튼·st.login 노출, 아니면 fail closed
-  ("Google 로그인 설정 오류"만 — 누락 키·값 비노출)
-- 그 외 값 → fail closed (보호 화면 없이 "관리자 설정 오류"만 표시)
+### Production 실화면 검증 (2026-07-22, 사용자 확인)
+- Google 로그인 화면 정상, **APP_PASSWORD 화면 미노출**.
+- 허용된 Google 계정 로그인 성공. `invalid_client`·`redirect_uri_mismatch`·
+  `access_denied`·무한 redirect **없음**.
+- 기존 앱 본문 정상, 기존 Supabase 데이터 정상 표시.
+- 로그인 지속성(Chrome): 같은 탭 새로고침 유지 / 새 탭 유지 /
+  모든 탭 종료 후 재접속 유지.
+- 앱 내부 로그아웃: 즉시 Google 로그인 화면 전환, 보호 본문 미노출,
+  같은 탭 새로고침·새 탭 접속 모두 재로그인 요구, **APP_PASSWORD fallback 없음**.
+- 최종 재로그인 후 운영 상태 복구 완료.
 
-### 허용 이메일 정책
-- `ALLOWED_GOOGLE_EMAILS` canonical 형식은 **쉼표 구분 문자열 1개**
-  (TOML 리스트도 파싱 지원). 실제 값은 staging Secrets에서만 설정 — repo 커밋 금지.
-- strip+casefold 정규화 + 빈 항목·중복 제거 후 **정확 일치만** 허용.
-  부분 일치·도메인 와일드카드 금지.
-- allowlist 미설정·빈 목록 → fail closed. email claim 없음 → 거부.
-- 미허용 계정: "허용되지 않은 Google 계정입니다" + 로그아웃(계정 변경) 버튼.
-- gate는 `main()` 최상단 — 미로그인·미허용 시 DB/Relay/FDR/Toss/본문 진입 0.
+### 기능 회귀 확인
+- 기존 KPI·실데이터 정상, 국장↔미장 왕복 정상, Toss Relay 경고 없음.
+- Authlib 오류·관리자 설정 오류·True/False 디버그 출력·traceback·segfault **없음**.
 
-### staging에 필요한 Secrets (값은 여기 기록하지 않음)
-- `AUTH_MODE = "oidc"`
-- `ALLOWED_GOOGLE_EMAILS = "<허용 이메일>"` (콤마 구분)
-- `[auth]` 섹션: `redirect_uri = "https://<APP_URL>/oauth2callback"`,
-  `cookie_secret`, `client_id`, `client_secret`,
-  `server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"`
-- **실제 Google Cloud OAuth client 설정은 미수행** — staging 수동 검증 항목.
-
-### 변경 파일
+### 변경 파일 (91523e0 → 44cd398)
 - `app/auth.py` (신규): 모드 판정·이메일 allowlist 순수 함수 (Streamlit 비의존)
 - `app/config.py`: `AUTH_MODE`, `ALLOWED_GOOGLE_EMAILS` env 추가
 - `dashboard/app.py`: `gate()` 모드 dispatch + `_password_gate()`(기존 보존) +
   `_oidc_gate()` (로그인 화면 / 미허용 차단 / 사이드바 소형 로그아웃)
 - `requirements.txt`: `Authlib>=1.3.2` 추가
-- `tests/test_auth_oidc.py` (신규, 31개): 모드·allowlist·gate 흐름·보호 경계·password 회귀
-- `.claude/launch.json`: 로컬 검증용 실행 구성(런타임 영향 없음)
+- `tests/test_auth_oidc.py` (신규), `tests/test_auth_gate.py` 보강
+- 보호 파일 무변경: dashboard/database.py·app/toss*.py·services/toss_relay/**·
+  schema/CSV·Dockerfile·workflows·Fly 설정.
 
-### 검증 결과 (보안 하드닝 라운드 포함)
-- 전체 pytest **439 passed** (기준 385 + 신규 54, 회귀 0). 기존
-  auth/카드/Toss/Relay 테스트 전부 통과.
-- 로컬 E2E(password 정상 설정): health 200, 로그인 화면, 오답 거부, 정답 통과,
-  본문은 **stub DB로만 렌더**(실제 Supabase read 0). traceback·segfault 0.
-- 로컬 E2E(APP_PASSWORD 누락): "관리자 인증 설정 오류" fail closed —
-  비밀번호 입력창·본문 미노출.
-- 로컬 E2E(oidc, `[auth]` 미설정): "Google 로그인 설정 오류" fail closed —
-  로그인 버튼 미노출. 실제 Google redirect 로그인은 staging Secrets 설정 후 수동 검증.
-- 로컬(잘못된 AUTH_MODE): fail closed 확인.
-- **기존 DB 데이터 무변경** — migration 없음, user/email 컬럼 추가 없음,
-  DB read/write 0, 실제 네트워크 호출 0. Production 변경 없음.
+### 검증 결과
+- 전체 pytest **445 passed** (회귀 0). GitHub checks: tests·deploy-smoke success.
+- Production 4분 smoke PASS(검사 17회·실패 0·bootstrap 303→final 200).
+- DB migration·write 0, 실제 네트워크 호출 0.
+  Secrets·Google Cloud·Fly는 이번 작업에서 추가 변경 없음.
+
+### 취소된 로그아웃 핫픽스 (기록용)
+- 사용자가 **Chrome/Google 계정 로그아웃**을 Z PICK 앱 내부 로그아웃으로 오해해
+  "로그아웃 무반응"으로 보고됨.
+- 이 오해를 전제로 `ff03e73`(로그아웃을 스크립트 본문 직접 호출로 변경) 핫픽스가
+  생성됐으나 **Production main에는 병합하지 않았다.**
+- 실제 Production 앱 내부 로그아웃은 기존 `44cd398`에서 정상 작동한다.
+- staging은 `f32b86a` revert로 원복 — staging tree는 `44cd398`과 동일.
+- `hotfix/oidc-logout`(ff03e73) 브랜치는 이력 보존용으로 남긴다.
+- 내부 Streamlit 큐 경합 등 원인 가설은 **확정 원인으로 기록하지 않는다.**
 
 ## DB write 허용 여부
 아니오 (읽기 전용)
 
 ## push 허용 여부
-아니오 — commit·push·deploy·Secrets 변경 전부 사용자 승인 대기.
+완료 — 이번 릴리스 관련 push는 모두 승인 후 수행됨.
+추가 코드·Secrets·배포 변경은 신규 승인 대상.
