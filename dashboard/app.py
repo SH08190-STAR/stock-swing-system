@@ -243,11 +243,8 @@ def _password_gate(sec=None) -> bool:
 
 # ── Google OIDC gate (Streamlit 공식 st.login/st.user/st.logout) ─────────
 # 30일 identity cookie는 Community Cloud의 공식 OIDC 세션이 관리한다 —
-# 자체 cookie·component·브라우저 저장소·token 구현 없음. st.logout()은 위젯
-# 콜백(on_click)이 아니라 스크립트 본문에서 직접 호출한다 — Production
-# Community Cloud에서 on_click 방식이 실제로 무반응이었고(내부 원인 미확정),
-# 공식 문서가 함께 제시하는 두 형태 중 본문 직접 호출로 교체했다.
-# st.login()·st.logout()은 자체적으로 새 세션을 시작하므로 추가 st.rerun을 부르지 않는다.
+# 자체 cookie·component·브라우저 저장소·token 구현 없음. st.login()·st.logout()은
+# 자체적으로 새 세션을 시작하므로 추가 st.rerun을 부르지 않는다.
 # 허용 판정은 app.auth의 순수 함수(정확 일치·fail closed)만 사용하고,
 # 허용 목록·내부 설정은 화면·로그에 출력하지 않는다.
 # preflight: [auth] 필수 설정이 유효하지 않으면 로그인 버튼·st.login을 열지 않고
@@ -273,16 +270,14 @@ def _oidc_gate(sec=None) -> bool:
     if not auth.is_email_allowed(email, allowed):
         st.title("🔒 Z PICK")
         st.error("허용되지 않은 Google 계정입니다")
-        if st.button("다른 계정으로 로그인", key="oidc_switch_account"):
-            st.logout()
+        st.button("다른 계정으로 로그인", on_click=st.logout)
         return False
     # 통과 — 사이드바 상단에 작은 로그아웃만 제공(본문 카드·모바일 레이아웃 무영향).
     with st.sidebar:
         name = getattr(user, "name", "") or ""
         if name:
             st.caption(str(name))
-        if st.button("로그아웃", key="oidc_logout"):
-            st.logout()
+        st.button("로그아웃", on_click=st.logout, key="oidc_logout")
     return True
 
 

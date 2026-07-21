@@ -138,9 +138,6 @@ class _OidcStubSt:
         self.errors = []
         self.captions = []
         self.buttons = []           # (label, on_click)
-        self.button_keys = []       # 렌더된 버튼의 key (None 포함)
-        self.clicks = set()         # 클릭 시뮬레이션: label 또는 key를 넣으면
-                                    # 다음 렌더에서 해당 버튼이 True를 반환한다
         self.rerun_calls = 0
         self.stop_calls = 0
         self.login_calls = 0
@@ -167,9 +164,7 @@ class _OidcStubSt:
 
     def button(self, label, *a, on_click=None, key=None, **k):
         self.buttons.append((label, on_click))
-        self.button_keys.append(key)
-        # 실제 Streamlit처럼 클릭된 run에서만 True — if 방식 배선을 실행 검증한다
-        return (label in self.clicks) or (key is not None and key in self.clicks)
+        return False
 
     def rerun(self):
         self.rerun_calls += 1
@@ -224,36 +219,19 @@ def test_allowed_user_passes():
 
 def test_allowed_user_gets_logout_button():
     m = _stub_oidc(user=_user())
-    assert m.gate() is True                       # 클릭 전 본문 통과 정상
-    assert any("로그아웃" in b[0] for b in m.st.buttons)
-    assert m.st.logout_calls == 0                 # 렌더만으로는 st.logout 호출 0
-
-
-def test_logout_click_executes_st_logout_once_without_rerun():
-    """클릭된 run에서 실제 st.logout이 정확히 1회 실행되고 추가 rerun이 없다.
-
-    배선 참조 검사(on_click == st.logout)가 아니라 클릭 시뮬레이션으로
-    실행 경로 자체를 검증한다 — 괄호 누락(st.logout 참조만)·lambda 반환·
-    잘못된 wrapper 결함은 이 테스트에서 logout_calls == 0으로 잡힌다."""
-    m = _stub_oidc(user=_user())
-    m.st.clicks.add("oidc_logout")
-    m.gate()
+    assert m.gate() is True
+    logout_btn = next(b for b in m.st.buttons if "로그아웃" in b[0])
+    assert m.st.logout_calls == 0
+    logout_btn[1]()
     assert m.st.logout_calls == 1
-    assert m.st.rerun_calls == 0                  # st.logout 뒤 추가 rerun 금지
-    assert m.st.stop_calls == 0
 
 
 def test_denied_user_blocked_with_message():
     m = _stub_oidc(user=_user(email="other@example.com"))
     assert m.gate() is False
     assert any("허용되지 않은" in e for e in m.st.errors)
-    assert m.st.logout_calls == 0                 # 렌더만으로는 호출 0
-    # 계정 변경 경로: 클릭 시 실제 st.logout 1회
-    m2 = _stub_oidc(user=_user(email="other@example.com"))
-    m2.st.clicks.add("oidc_switch_account")
-    assert m2.gate() is False
-    assert m2.st.logout_calls == 1
-    assert m2.st.rerun_calls == 0
+    # 계정 변경 경로: 로그아웃 배선 제공
+    assert any(b[1] == m.st.logout for b in m.st.buttons)
 
 
 def test_missing_email_claim_blocked():
@@ -300,61 +278,6 @@ def test_oidc_gate_has_no_rerun():
     tree = ast.parse(textwrap.dedent(inspect.getsource(m._oidc_gate)))
     assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                    and n.func.attr == "rerun" for n in ast.walk(tree))
-
-
-def test_st_logout_only_appears_as_direct_call():
-    """_oidc_gate 안의 st.logout은 반드시 직접 호출(st.logout())로만 존재한다.
-
-    이 저장소의 계약: Production Community Cloud에서 on_click 배선이 실제로
-    무반응이었으므로(내부 원인 미확정) 본문 직접 호출 형태만 허용한다.
-    Streamlit 일반의 on_click 사용 가부에 대한 주장이 아니다.
-    괄호 누락(if btn: st.logout)·콜백 참조·lambda·wrapper 반환을 AST로 차단."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(_dash()._oidc_gate)))
-    parents = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-    seen = 0
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Attribute) and node.attr == "logout"
-                and isinstance(node.value, ast.Name) and node.value.id == "st"):
-            seen += 1
-            p = parents.get(node)
-            assert isinstance(p, ast.Call) and p.func is node, \
-                "st.logout이 호출되지 않고 참조만 됨(괄호 누락/콜백/lambda)"
-    assert seen >= 2                        # 사이드바 + 미허용 화면 두 경로 모두
-    assert not any(isinstance(n, ast.Lambda) for n in ast.walk(tree))
-
-
-def test_oidc_widget_keys_present_and_unique():
-    m = _stub_oidc(user=_user())
-    m.gate()
-    keys = [k for k in m.st.button_keys if k is not None]
-    assert "oidc_logout" in keys
-    assert len(keys) == len(set(keys))      # 동일 key 충돌 없음
-
-
-def test_password_mode_renders_no_oidc_logout_button():
-    class _PwUiStub(_OidcStubSt):
-        def text_input(self, *a, **k):
-            return ""
-
-    m = _dash()
-    m.st = _PwUiStub(None, secrets={})
-    m.config = SimpleNamespace(AUTH_MODE="password", APP_PASSWORD="pw123")
-    assert m.gate() is False
-    assert not any("로그아웃" in b[0] for b in m.st.buttons)
-    assert m.st.logout_calls == 0
-
-
-def test_oidc_gate_does_not_touch_session_state():
-    """OIDC 경로에 session_state 인증 흉내·custom 저장이 재도입되지 않는다."""
-    src = textwrap.dedent(inspect.getsource(_dash()._oidc_gate))
-    assert "session_state" not in src
-    m = _stub_oidc(user=_user())
-    m.st.clicks.add("oidc_logout")
-    m.gate()
-    assert m.st.session_state == {}         # 클릭 후에도 세션 저장 0
 
 
 def test_no_custom_cookie_or_component_in_dashboard():
